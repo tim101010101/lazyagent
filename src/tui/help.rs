@@ -23,17 +23,7 @@ pub fn render(
     } else if search_mode {
         vec![("Enter", "apply"), ("Esc", "cancel")]
     } else {
-        vec![
-            ("j/k", "nav"),
-            ("Enter", "attach"),
-            ("i", "passthrough"),
-            ("n", "new"),
-            ("d", "kill"),
-            ("/", "search"),
-            ("Tab", "group"),
-            ("l/h", "detail"),
-            ("q", "quit"),
-        ]
+        vec![("?", "help"), ("q", "quit")]
     };
 
     let mut spans = Vec::new();

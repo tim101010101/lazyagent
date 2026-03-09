@@ -120,6 +120,11 @@ fn main() -> anyhow::Result<()> {
                 app.passthrough_mode,
                 &app.theme,
             );
+
+            // Help overlay (rendered last, on top)
+            if app.show_help_overlay {
+                tui::help_overlay::render(frame, &app.theme);
+            }
         })?;
 
         // Handle events

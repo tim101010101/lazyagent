@@ -1,5 +1,6 @@
 pub mod detail;
 pub mod help;
+pub mod help_overlay;
 pub mod layout;
 pub mod sidebar;
 pub mod theme;

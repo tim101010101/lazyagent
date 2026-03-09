@@ -56,6 +56,7 @@ pub enum SidebarItem {
 pub struct App {
     pub running: bool,
     pub show_detail: bool,
+    pub show_help_overlay: bool,
     pub search_mode: bool,
     pub search_query: String,
     pub sessions: Vec<AgentSession>,
@@ -84,6 +85,7 @@ impl App {
         App {
             running: true,
             show_detail: true,
+            show_help_overlay: false,
             search_mode: false,
             search_query: String::new(),
             sessions: Vec::new(),
@@ -345,6 +347,23 @@ impl App {
         // Ctrl+C always quits
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.running = false;
+            return;
+        }
+
+        // Help overlay toggle
+        if key.code == KeyCode::Char('?') && !self.search_mode {
+            self.show_help_overlay = !self.show_help_overlay;
+            return;
+        }
+
+        // Close help overlay with Esc
+        if self.show_help_overlay && key.code == KeyCode::Esc {
+            self.show_help_overlay = false;
+            return;
+        }
+
+        // Block other keys when help overlay is shown
+        if self.show_help_overlay {
             return;
         }
 
