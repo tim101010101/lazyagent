@@ -7,14 +7,46 @@ use ratatui::{backend::TestBackend, Terminal};
 use crate::app::{App, GroupingMode, SidebarItem};
 use crate::config::CustomGroup;
 use crate::protocol::{
-    AgentSession, AgentStatus, ExecPlan, Provider, ProviderManifest, SessionKind, SessionSource,
+    AgentSession, AgentStatus, ExecPlan, LineMatcher, Provider, ProviderManifest, SessionKind,
+    SessionSource, StatusResolver, StatusRule, TextMatchResolver,
 };
 use crate::session::SessionManager;
 use crate::tui::layout::AppLayout;
 
 // ===== Mock Provider =====
 
-struct MockProvider;
+static MOCK_TEXT_RULES: &[StatusRule] = &[
+    StatusRule {
+        status: AgentStatus::Error,
+        matcher: LineMatcher::Contains("Error"),
+        max_line: None,
+    },
+    StatusRule {
+        status: AgentStatus::Thinking,
+        matcher: LineMatcher::Contains("thinking"),
+        max_line: None,
+    },
+    StatusRule {
+        status: AgentStatus::Waiting,
+        matcher: LineMatcher::Contains(">"),
+        max_line: None,
+    },
+];
+
+struct MockProvider {
+    resolvers: Vec<Box<dyn StatusResolver>>,
+}
+
+impl MockProvider {
+    fn new() -> Self {
+        let resolvers: Vec<Box<dyn StatusResolver>> = vec![Box::new(TextMatchResolver::new(
+            MOCK_TEXT_RULES,
+            20,
+            AgentStatus::Unknown,
+        ))];
+        Self { resolvers }
+    }
+}
 
 impl Provider for MockProvider {
     fn manifest(&self) -> ProviderManifest {
@@ -24,20 +56,12 @@ impl Provider for MockProvider {
         }
     }
 
-    fn detect_status(&self, pane_output: &str) -> AgentStatus {
-        if pane_output.contains("Error") {
-            AgentStatus::Error
-        } else if pane_output.contains("thinking") {
-            AgentStatus::Thinking
-        } else if pane_output.contains(">") {
-            AgentStatus::Waiting
-        } else {
-            AgentStatus::Unknown
-        }
-    }
-
     fn match_process(&self, process_name: &str) -> bool {
         process_name == "mock-agent"
+    }
+
+    fn resolvers(&self) -> &[Box<dyn StatusResolver>] {
+        &self.resolvers
     }
 
     fn exec_plan(&self, cwd: &std::path::Path) -> ExecPlan {
@@ -96,7 +120,7 @@ fn make_session_with_root(
 }
 
 fn make_app(sessions: Vec<AgentSession>) -> App {
-    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider)];
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::new())];
     let sm = SessionManager::with_sessions(providers, sessions);
     let mut app = App::new(sm);
     app.refresh_sessions(); // populate from mock sessions
@@ -514,7 +538,7 @@ fn test_grouping_mode_label() {
 
 #[test]
 fn test_git_root_preserved_through_update_sessions() {
-    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider)];
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::new())];
     let sm = SessionManager::with_sessions(providers, vec![]);
     let mut app = App::new(sm);
 
@@ -536,7 +560,7 @@ fn test_git_root_preserved_through_update_sessions() {
 
 #[test]
 fn test_git_root_none_becomes_ungrouped_in_update_sessions() {
-    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider)];
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::new())];
     let sm = SessionManager::with_sessions(providers, vec![]);
     let mut app = App::new(sm);
 
@@ -556,7 +580,7 @@ fn test_git_root_none_becomes_ungrouped_in_update_sessions() {
 
 #[test]
 fn test_mixed_git_root_and_none_grouping() {
-    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider)];
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::new())];
     let sm = SessionManager::with_sessions(providers, vec![]);
     let mut app = App::new(sm);
 

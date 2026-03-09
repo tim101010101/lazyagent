@@ -24,12 +24,13 @@ use tracing::{debug, error, info, warn};
 use app::App;
 use bg::BgRequest;
 use provider::claude::ClaudeProvider;
+use provider::codex::CodexProvider;
 use session::SessionManager;
 use tmux::TmuxController;
 use tui::layout::AppLayout;
 
 fn main() -> anyhow::Result<()> {
-    let _log_guard = log::init_logging();
+    let _log_guards = log::init_logging();
 
     if !std::io::stdout().is_terminal() {
         anyhow::bail!("lazyagent requires an interactive terminal (TTY)");
@@ -49,13 +50,19 @@ fn main() -> anyhow::Result<()> {
     }));
 
     // Providers for main thread (attach/spawn)
-    let providers: Vec<Box<dyn protocol::Provider>> = vec![Box::new(ClaudeProvider::new())];
+    let providers: Vec<Box<dyn protocol::Provider>> = vec![
+        Box::new(ClaudeProvider::new()),
+        Box::new(CodexProvider::new()),
+    ];
     let session_manager = SessionManager::new(providers);
     let mut app = App::new(session_manager);
     app.load_config();
 
     // Background worker with its own provider instances
-    let bg_providers: Vec<Box<dyn protocol::Provider>> = vec![Box::new(ClaudeProvider::new())];
+    let bg_providers: Vec<Box<dyn protocol::Provider>> = vec![
+        Box::new(ClaudeProvider::new()),
+        Box::new(CodexProvider::new()),
+    ];
     let (bg_tx, bg_rx, bg_handle) = bg::spawn_worker(bg_providers);
 
     // Trigger initial refresh
