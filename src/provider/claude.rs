@@ -13,9 +13,6 @@ use crate::protocol::{
 
 // ===== Claude JSONL Resolver (lsof + cache) =====
 
-/// Max age (in seconds) for a JSONL file to be considered active.
-const JSONL_ACTIVE_WINDOW_SECS: u64 = 60;
-
 struct ClaudeJsonlResolver {
     cache: Mutex<HashMap<u32, PathBuf>>,
 }
@@ -32,8 +29,9 @@ impl ClaudeJsonlResolver {
         cwd.replace('/', "-")
     }
 
-    /// Find active JSONL file for a given cwd (no stale fallback).
-    /// Returns None if no recently-modified file or ambiguous.
+    /// Find the best JSONL file for a given cwd.
+    /// Picks the most recently modified .jsonl — safe because caller already
+    /// confirmed the agent process is running.
     fn find_session_jsonl(cwd: &str) -> Option<PathBuf> {
         let home = dirs::home_dir()?;
         let encoded = Self::encode_cwd(cwd);
@@ -44,8 +42,7 @@ impl ClaudeJsonlResolver {
             return None;
         }
 
-        let now = SystemTime::now();
-        let mut candidates: Vec<(PathBuf, SystemTime)> = Vec::new();
+        let mut best: Option<(PathBuf, SystemTime)> = None;
 
         let entries = fs::read_dir(&project_dir).ok()?;
         for entry in entries.flatten() {
@@ -53,25 +50,15 @@ impl ClaudeJsonlResolver {
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
                 if let Ok(meta) = path.metadata() {
                     if let Ok(modified) = meta.modified() {
-                        let age = now.duration_since(modified).unwrap_or_default().as_secs();
-                        if age <= JSONL_ACTIVE_WINDOW_SECS {
-                            candidates.push((path, modified));
+                        if best.as_ref().map_or(true, |(_, t)| modified > *t) {
+                            best = Some((path, modified));
                         }
                     }
                 }
             }
         }
 
-        if candidates.len() > 1 {
-            debug!(
-                cwd,
-                count = candidates.len(),
-                "ambiguous: multiple active JSONL files"
-            );
-            return None;
-        }
-
-        candidates.into_iter().next().map(|(p, _)| p)
+        best.map(|(p, _)| p)
     }
 
     /// Tool names that indicate human-in-the-loop interaction.

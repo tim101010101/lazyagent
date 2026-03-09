@@ -1,15 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::Mutex;
 
-use tracing::{debug, trace};
+use tracing::{debug, trace, warn};
 
 use crate::protocol::{
     find_open_jsonl, AgentStatus, ExecPlan, Provider, ProviderManifest, ResolveContext,
     StatusResolver,
 };
 
-// ===== Codex JSONL Resolver (lsof + cache) =====
+// ===== Codex JSONL Resolver (lsof → SQLite fallback, with cache) =====
 
 struct CodexJsonlResolver {
     cache: Mutex<HashMap<u32, PathBuf>>,
@@ -19,6 +20,42 @@ impl CodexJsonlResolver {
     fn new() -> Self {
         Self {
             cache: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Query sqlite3 for the rollout_path associated with a PID.
+    fn query_rollout_path(pid: u32) -> Option<PathBuf> {
+        let home = dirs::home_dir()?;
+        let db_path = home.join(".codex").join("state_5.sqlite");
+        if !db_path.exists() {
+            return None;
+        }
+
+        let query = format!(
+            "SELECT t.rollout_path FROM logs l \
+             JOIN threads t ON l.thread_id = t.id \
+             WHERE l.process_uuid GLOB 'pid:{}:*' \
+             AND l.thread_id IS NOT NULL \
+             ORDER BY l.id DESC LIMIT 1",
+            pid
+        );
+
+        let output = Command::new("sqlite3")
+            .args(["-readonly", db_path.to_str()?, &query])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(pid, stderr = %stderr, "sqlite3 query failed");
+            return None;
+        }
+
+        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if result.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(result))
         }
     }
 
@@ -40,29 +77,35 @@ impl CodexJsonlResolver {
             _ => None,
         }
     }
+
+    /// Find rollout path: cache → lsof → SQLite.
+    fn find_rollout_path(&self, pid: u32) -> Option<PathBuf> {
+        // Check cache
+        if let Some(path) = self.cache.lock().ok()?.get(&pid).cloned() {
+            return Some(path);
+        }
+
+        // Try lsof
+        let path = find_open_jsonl(pid).or_else(|| {
+            // Fallback: SQLite query
+            let p = Self::query_rollout_path(pid)?;
+            debug!(pid, path = %p.display(), "codex rollout via sqlite");
+            Some(p)
+        })?;
+
+        // Cache the result
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(pid, path.clone());
+        }
+
+        Some(path)
+    }
 }
 
 impl StatusResolver for CodexJsonlResolver {
     fn resolve(&self, ctx: &ResolveContext) -> Option<AgentStatus> {
         let pid = ctx.matched_pid.unwrap_or(ctx.pane_pid);
-
-        // Check cache first
-        let cached = self.cache.lock().ok()?.get(&pid).cloned();
-        if let Some(ref path) = cached {
-            let status = Self::parse_rollout_status(path);
-            debug!(?status, path = %path.display(), pid, "codex status from cache");
-            return status;
-        }
-
-        // lsof lookup
-        let path = find_open_jsonl(pid)?;
-        debug!(pid, path = %path.display(), "codex jsonl discovered via lsof");
-
-        // Cache the path
-        if let Ok(mut cache) = self.cache.lock() {
-            cache.insert(pid, path.clone());
-        }
-
+        let path = self.find_rollout_path(pid)?;
         let status = Self::parse_rollout_status(&path);
         debug!(?status, path = %path.display(), pid, "codex status resolved");
         status
@@ -186,20 +229,17 @@ mod tests {
 
     #[test]
     fn test_resolver_cache_hit() {
-        // Pre-populate cache with a known path, verify resolver reads from it
         let dir = std::env::temp_dir();
         let path = dir.join("test_codex_cache_hit.jsonl");
         std::fs::write(&path, r#"{"type":"task_complete","data":{}}"#).unwrap();
 
         let resolver = CodexJsonlResolver::new();
-        // Inject into cache — simulates a previous lsof discovery
         resolver.cache.lock().unwrap().insert(42, path.clone());
 
         let ctx = ResolveContext::new(1, "/tmp".into(), "%0".into(), None, Some(42));
         let status = resolver.resolve(&ctx);
         assert_eq!(status, Some(AgentStatus::Waiting));
 
-        // Update file content, cache still points to same path
         std::fs::write(&path, r#"{"type":"task_started","data":{}}"#).unwrap();
         let status = resolver.resolve(&ctx);
         assert_eq!(status, Some(AgentStatus::Thinking));
