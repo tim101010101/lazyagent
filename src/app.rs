@@ -1,21 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::HashMap;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::protocol::{
-    ExecPlan, ListQuery, Provider, SessionDetail, SessionSummary,
-};
-use crate::tmux::TmuxController;
+use crate::bg::BgUpdate;
+use crate::protocol::{AgentSession, SessionSource};
+use crate::session::SessionManager;
 
 #[derive(Debug, Clone)]
 pub enum SidebarItem {
+    SourceHeader(String),
     ProjectHeader(String),
-    Session(SessionSummary),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum Panel {
-    Sidebar,
+    Session(usize), // index into sessions vec
 }
 
 pub struct App {
@@ -23,144 +18,193 @@ pub struct App {
     pub show_detail: bool,
     pub search_mode: bool,
     pub search_query: String,
+    pub sessions: Vec<AgentSession>,
     pub sidebar_items: Vec<SidebarItem>,
     pub selected_index: usize,
-    pub current_detail: Option<SessionDetail>,
-    pub panel: Panel,
     pub error_message: Option<String>,
-    pub health_message: Option<String>,
-    pub tmux: Option<TmuxController>,
-    pub agent_running: bool,
-    providers: Vec<Box<dyn Provider>>,
+    pub confirm_kill: Option<usize>,
+    pub pane_preview: Option<String>,
+    pub preview_cache: HashMap<String, String>,
+    pub pending_preview: Option<String>,
+    session_manager: SessionManager,
 }
 
 impl App {
-    pub fn new(providers: Vec<Box<dyn Provider>>) -> Self {
-        let tmux = TmuxController::detect();
-        let mut app = App {
+    pub fn new(session_manager: SessionManager) -> Self {
+        App {
             running: true,
             show_detail: true,
             search_mode: false,
             search_query: String::new(),
+            sessions: Vec::new(),
             sidebar_items: Vec::new(),
             selected_index: 0,
-            current_detail: None,
-            panel: Panel::Sidebar,
             error_message: None,
-            health_message: None,
-            tmux,
-            agent_running: false,
-            providers,
-        };
-        app.check_health();
-        app.refresh_sessions();
-        app
-    }
-
-    fn check_health(&mut self) {
-        for provider in &self.providers {
-            let health = provider.health();
-            if !health.available {
-                self.health_message = health.message;
-                return;
-            }
-            if let Some(msg) = health.message {
-                self.health_message = Some(msg);
-            }
+            confirm_kill: None,
+            pane_preview: None,
+            preview_cache: HashMap::new(),
+            pending_preview: None,
+            session_manager,
         }
     }
 
-    pub fn refresh_sessions(&mut self) {
-        let query = ListQuery {
-            search: if self.search_query.is_empty() {
-                None
-            } else {
-                Some(self.search_query.clone())
-            },
-            ..Default::default()
-        };
-
-        let mut all_sessions: Vec<SessionSummary> = Vec::new();
-
-        for provider in &self.providers {
-            match provider.list_sessions(&query) {
-                Ok(response) => {
-                    all_sessions.extend(response.items);
-                }
-                Err(e) => {
-                    self.error_message = Some(e.message.clone());
-                }
-            }
+    /// Update sessions list from externally-provided data. No subprocess calls.
+    pub fn update_sessions(&mut self, mut sessions: Vec<AgentSession>) {
+        // Filter by search query
+        if !self.search_query.is_empty() {
+            let q = self.search_query.to_lowercase();
+            sessions.retain(|s| {
+                s.provider.to_lowercase().contains(&q)
+                    || s.cwd.to_string_lossy().to_lowercase().contains(&q)
+            });
         }
 
-        // Sort by updated_at descending
-        all_sessions.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        // Sort by started_at descending (most recent first)
+        sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-        // Group by project
-        let mut groups: BTreeMap<String, Vec<SessionSummary>> = BTreeMap::new();
-        for session in all_sessions {
-            let project = session
-                .project_path
-                .clone()
-                .unwrap_or_else(|| "Unknown".into());
-            groups.entry(project).or_default().push(session);
-        }
-
-        // Build sidebar items
+        // Group by source → cwd parent
         self.sidebar_items.clear();
-        for (project, sessions) in &groups {
-            self.sidebar_items
-                .push(SidebarItem::ProjectHeader(project.clone()));
-            for session in sessions {
-                self.sidebar_items
-                    .push(SidebarItem::Session(session.clone()));
+
+        // Collect sources
+        let mut local_sessions: Vec<(usize, &AgentSession)> = Vec::new();
+        let mut remote_groups: std::collections::BTreeMap<String, Vec<(usize, &AgentSession)>> =
+            std::collections::BTreeMap::new();
+
+        for (i, session) in sessions.iter().enumerate() {
+            match &session.source {
+                SessionSource::Local => local_sessions.push((i, session)),
+                SessionSource::Remote { host } => {
+                    remote_groups
+                        .entry(host.clone())
+                        .or_default()
+                        .push((i, session));
+                }
             }
         }
+
+        // Build local section
+        if !local_sessions.is_empty() {
+            self.sidebar_items
+                .push(SidebarItem::SourceHeader("local".into()));
+            self.build_project_groups(&local_sessions);
+        }
+
+        // Build remote sections
+        for (host, group) in &remote_groups {
+            self.sidebar_items
+                .push(SidebarItem::SourceHeader(host.clone()));
+            self.build_project_groups(group);
+        }
+
+        self.sessions = sessions;
 
         // Adjust selection
         if self.selected_index >= self.sidebar_items.len() {
             self.selected_index = self.sidebar_items.len().saturating_sub(1);
         }
-
-        // Ensure we're on a session, not a header
         self.skip_to_nearest_session();
+        self.update_preview_from_cache();
+    }
 
-        // Load detail for current selection
-        self.load_current_detail();
+    /// Apply a background update (sessions or preview).
+    pub fn apply_bg_update(&mut self, update: BgUpdate) {
+        match update {
+            BgUpdate::Sessions(sessions) => self.update_sessions(sessions),
+            BgUpdate::Preview { pane_id, content } => {
+                self.preview_cache.insert(pane_id, content);
+                self.update_preview_from_cache();
+            }
+        }
+    }
+
+    /// Set pane_preview from cache for current selection. Request bg capture if missing.
+    fn update_preview_from_cache(&mut self) {
+        if let Some(session) = self.selected_session() {
+            let pane_id = session.tmux_pane.clone();
+            if let Some(cached) = self.preview_cache.get(&pane_id) {
+                self.pane_preview = Some(cached.clone());
+                self.pending_preview = None;
+            } else {
+                // Show stale preview while waiting
+                self.pending_preview = Some(pane_id);
+            }
+        } else {
+            self.pane_preview = None;
+            self.pending_preview = None;
+        }
+    }
+
+    /// Legacy: poll sessions via SessionManager (used in tests).
+    pub fn refresh_sessions(&mut self) {
+        let sessions = self.session_manager.poll();
+        self.update_sessions(sessions);
+    }
+
+    pub fn refresh_preview(&mut self) {
+        // Request preview for current selection via pending_preview
+        if let Some(session) = self.selected_session() {
+            self.pending_preview = Some(session.tmux_pane.clone());
+        }
+    }
+
+    fn build_project_groups(&mut self, sessions: &[(usize, &AgentSession)]) {
+        let mut by_project: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+
+        for (idx, session) in sessions {
+            let parent = session
+                .cwd
+                .parent()
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".into());
+            by_project.entry(parent).or_default().push(*idx);
+        }
+
+        for (project, indices) in &by_project {
+            self.sidebar_items
+                .push(SidebarItem::ProjectHeader(project.clone()));
+            for &idx in indices {
+                self.sidebar_items.push(SidebarItem::Session(idx));
+            }
+        }
     }
 
     fn skip_to_nearest_session(&mut self) {
         if self.sidebar_items.is_empty() {
             return;
         }
-        // If on a header, move down to next session
-        if matches!(self.sidebar_items.get(self.selected_index), Some(SidebarItem::ProjectHeader(_))) {
-            if self.selected_index + 1 < self.sidebar_items.len() {
-                self.selected_index += 1;
+        if !matches!(
+            self.sidebar_items.get(self.selected_index),
+            Some(SidebarItem::Session(_))
+        ) {
+            // Move forward to find a session
+            for i in self.selected_index..self.sidebar_items.len() {
+                if matches!(self.sidebar_items[i], SidebarItem::Session(_)) {
+                    self.selected_index = i;
+                    return;
+                }
+            }
+            // Try backward
+            for i in (0..self.selected_index).rev() {
+                if matches!(self.sidebar_items[i], SidebarItem::Session(_)) {
+                    self.selected_index = i;
+                    return;
+                }
             }
         }
     }
 
-    fn load_current_detail(&mut self) {
-        if let Some(SidebarItem::Session(summary)) = self.sidebar_items.get(self.selected_index) {
-            let native_id = summary.native_id.clone();
-            let provider_id = summary.provider_id.clone();
+    pub fn selected_session(&self) -> Option<&AgentSession> {
+        match self.sidebar_items.get(self.selected_index) {
+            Some(SidebarItem::Session(idx)) => self.sessions.get(*idx),
+            _ => None,
+        }
+    }
 
-            for provider in &self.providers {
-                if provider.manifest().id == provider_id {
-                    match provider.session_detail(&native_id) {
-                        Ok(detail) => {
-                            self.current_detail = Some(detail);
-                        }
-                        Err(_) => {
-                            self.current_detail = None;
-                        }
-                    }
-                    break;
-                }
-            }
-        } else {
-            self.current_detail = None;
+    pub fn selected_session_index(&self) -> Option<usize> {
+        match self.sidebar_items.get(self.selected_index) {
+            Some(SidebarItem::Session(idx)) => Some(*idx),
+            _ => None,
         }
     }
 
@@ -168,6 +212,26 @@ impl App {
         // Ctrl+C always quits
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.running = false;
+            return;
+        }
+
+        // Kill confirmation mode
+        if self.confirm_kill.is_some() {
+            match key.code {
+                KeyCode::Char('y') => {
+                    if let Some(idx) = self.confirm_kill.take() {
+                        if let Some(session) = self.sessions.get(idx) {
+                            if let Err(e) = self.session_manager.kill(session) {
+                                self.error_message = Some(format!("kill failed: {e}"));
+                            }
+                            self.refresh_sessions();
+                        }
+                    }
+                }
+                _ => {
+                    self.confirm_kill = None;
+                }
+            }
             return;
         }
 
@@ -184,11 +248,18 @@ impl App {
             KeyCode::Char('G') => self.move_to_bottom(),
             KeyCode::Char('l') => self.show_detail = true,
             KeyCode::Char('h') => self.show_detail = false,
+            KeyCode::Char('d') => {
+                if let Some(idx) = self.selected_session_index() {
+                    self.confirm_kill = Some(idx);
+                }
+            }
             KeyCode::Char('/') => {
                 self.search_mode = true;
                 self.search_query.clear();
             }
-            KeyCode::Enter => { /* handled in main.rs for suspend/exec */ }
+            KeyCode::Char('r') => self.refresh_sessions(),
+            // Enter and 'n' handled in main.rs
+            KeyCode::Enter | KeyCode::Char('n') => {}
             _ => {}
         }
     }
@@ -224,71 +295,56 @@ impl App {
         let len = self.sidebar_items.len() as i32;
         let mut new_idx = (self.selected_index as i32 + delta).clamp(0, len - 1) as usize;
 
-        // Skip project headers
-        if matches!(self.sidebar_items.get(new_idx), Some(SidebarItem::ProjectHeader(_))) {
+        // Skip headers
+        if !matches!(
+            self.sidebar_items.get(new_idx),
+            Some(SidebarItem::Session(_))
+        ) {
             let next = (new_idx as i32 + delta).clamp(0, len - 1) as usize;
             if matches!(self.sidebar_items.get(next), Some(SidebarItem::Session(_))) {
                 new_idx = next;
             } else {
-                // Can't skip past header — stay where we are
                 return;
             }
         }
 
-        if new_idx != self.selected_index {
-            self.selected_index = new_idx;
-            self.load_current_detail();
-        }
+        self.selected_index = new_idx;
+        self.update_preview_from_cache();
     }
 
     fn move_to_top(&mut self) {
         self.selected_index = 0;
         self.skip_to_nearest_session();
-        self.load_current_detail();
+        self.update_preview_from_cache();
     }
 
     fn move_to_bottom(&mut self) {
         if !self.sidebar_items.is_empty() {
             self.selected_index = self.sidebar_items.len() - 1;
-            self.load_current_detail();
-        }
-    }
-
-    pub fn resume_selected(&mut self) -> Option<ResumeAction> {
-        self.exec_plan_for_selected().map(|plan| ResumeAction {
-            program: plan.program,
-            args: plan.args,
-            cwd: plan.cwd,
-        })
-    }
-
-    pub fn exec_plan_for_selected(&mut self) -> Option<ExecPlan> {
-        let (native_id, provider_id) = match self.sidebar_items.get(self.selected_index) {
-            Some(SidebarItem::Session(s)) => (s.native_id.clone(), s.provider_id.clone()),
-            _ => return None,
-        };
-
-        for provider in &self.providers {
-            if provider.manifest().id == provider_id {
-                match provider.resume_command(&native_id) {
-                    Ok(plan) => return Some(plan),
-                    Err(e) => {
-                        self.error_message = Some(e.message);
+            // If last item is a header, move up
+            if !matches!(
+                self.sidebar_items.get(self.selected_index),
+                Some(SidebarItem::Session(_))
+            ) {
+                for i in (0..self.selected_index).rev() {
+                    if matches!(self.sidebar_items[i], SidebarItem::Session(_)) {
+                        self.selected_index = i;
+                        break;
                     }
                 }
-                break;
             }
+            self.update_preview_from_cache();
         }
-        None
     }
 
-    pub fn tmux_mode(&self) -> bool {
-        self.tmux.is_some()
+    pub fn session_manager(&self) -> &SessionManager {
+        &self.session_manager
     }
-}
 
-pub struct ResumeAction {
-    pub program: String,
-    pub args: Vec<String>,
-    pub cwd: Option<String>,
+    pub fn default_provider_id(&self) -> Option<String> {
+        self.session_manager
+            .providers()
+            .first()
+            .map(|p| p.manifest().id)
+    }
 }

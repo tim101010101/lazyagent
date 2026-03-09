@@ -1,36 +1,40 @@
 mod app;
+mod bg;
 mod event;
 mod protocol;
 mod provider;
+mod session;
 mod tmux;
 mod tui;
 
 use std::io::IsTerminal;
-use std::process::Command;
 use std::time::Duration;
 
+use ansi_to_tui::IntoText;
 use ratatui::{
     layout::Rect,
-    text::{Line, Span},
+    text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
 
 use app::App;
+use bg::BgRequest;
 use provider::claude::ClaudeProvider;
+use session::SessionManager;
 use tmux::TmuxController;
 use tui::layout::AppLayout;
 use tui::theme::Theme;
 
+const REFRESH_INTERVAL_TICKS: u32 = 20; // 20 * 100ms = 2s
+const PREVIEW_INTERVAL_TICKS: u32 = 2; // 2 * 100ms = 200ms
+
 fn main() -> anyhow::Result<()> {
     if !std::io::stdout().is_terminal() {
-        anyhow::bail!("lazyagent requires an interactive terminal (TTY). Please run it directly in a terminal emulator.");
+        anyhow::bail!("lazyagent requires an interactive terminal (TTY)");
     }
 
-    // Auto-start tmux if not already inside and tmux is available
-    let no_tmux = std::env::var("LAZYAGENT_NO_TMUX").is_ok();
-    if !no_tmux && std::env::var("TMUX").is_err() && TmuxController::tmux_available() {
-        #[cfg(unix)]
-        TmuxController::auto_start(); // never returns
+    if !TmuxController::tmux_available() {
+        anyhow::bail!("lazyagent requires tmux. Please install tmux and try again.");
     }
 
     // Restore terminal on panic
@@ -40,52 +44,62 @@ fn main() -> anyhow::Result<()> {
         default_panic(info);
     }));
 
-    // Register providers
+    // Providers for main thread (attach/spawn)
     let providers: Vec<Box<dyn protocol::Provider>> = vec![Box::new(ClaudeProvider::new())];
+    let session_manager = SessionManager::new(providers);
+    let mut app = App::new(session_manager);
 
-    let mut app = App::new(providers);
+    // Background worker with its own provider instances
+    let bg_providers: Vec<Box<dyn protocol::Provider>> = vec![Box::new(ClaudeProvider::new())];
+    let (bg_tx, bg_rx, bg_handle) = bg::spawn_worker(bg_providers);
+
+    // Trigger initial refresh
+    let _ = bg_tx.send(BgRequest::Refresh);
+
     let mut terminal = tui::init()?;
+    let mut tick_counter: u32 = 0;
+    let mut preview_counter: u32 = 0;
 
     while app.running {
-        let tmux_mode = app.tmux_mode();
-        // Use vertical stack only when agent pane is open (lazyagent pane is narrow)
-        let tmux_narrow = tmux_mode && app.agent_running;
+        // Drain all pending bg updates (non-blocking)
+        while let Ok(update) = bg_rx.try_recv() {
+            app.apply_bg_update(update);
+        }
+
+        // Send pending preview request
+        if let Some(pane_id) = app.pending_preview.take() {
+            let _ = bg_tx.send(BgRequest::Capture { pane_id });
+        }
 
         // Draw
         terminal.draw(|frame| {
-            let layout = if tmux_narrow {
-                AppLayout::tmux(frame.area(), app.show_detail)
-            } else {
-                AppLayout::new(frame.area(), app.show_detail)
-            };
+            let layout = AppLayout::new(frame.area(), app.show_detail);
 
             // Sidebar
             tui::sidebar::render(
                 frame,
                 layout.sidebar,
                 &app.sidebar_items,
+                &app.sessions,
                 app.selected_index,
-                app.panel == app::Panel::Sidebar,
+                true,
             );
 
-            // Main area (only when not in narrow tmux mode)
-            if !tmux_narrow {
-                render_main(frame, layout.main, &app);
-            }
+            // Main area — pane preview
+            render_main(frame, layout.main, &app);
 
             // Detail panel
             if let Some(detail_area) = layout.detail {
-                tui::detail::render(frame, detail_area, app.current_detail.as_ref());
+                tui::detail::render(frame, detail_area, app.selected_session());
             }
 
             // Help bar
-            tui::help::render_with_mode(
+            tui::help::render(
                 frame,
                 layout.help_bar,
                 app.search_mode,
                 &app.search_query,
-                tmux_mode,
-                app.agent_running,
+                app.confirm_kill.is_some(),
             );
         })?;
 
@@ -93,112 +107,126 @@ fn main() -> anyhow::Result<()> {
         if let Some(ev) = event::poll_event(Duration::from_millis(100))? {
             match ev {
                 event::AppEvent::Key(key) => {
-                    // Check for resume action before normal key handling
-                    if key.code == crossterm::event::KeyCode::Enter && !app.search_mode {
-                        if tmux_mode {
-                            // Tmux mode: launch agent in split pane
-                            if let Some(plan) = app.exec_plan_for_selected() {
-                                if let Some(ref mut tmux) = app.tmux {
-                                    match tmux.launch_agent(&plan) {
-                                        Ok(()) => {
-                                            app.agent_running = true;
-                                            app.show_detail = false;
-                                            let _ = tmux.focus_agent();
-                                        }
-                                        Err(e) => {
-                                            app.error_message = Some(format!("tmux: {e}"));
-                                        }
-                                    }
+                    if key.code == crossterm::event::KeyCode::Enter
+                        && !app.search_mode
+                        && app.confirm_kill.is_none()
+                    {
+                        // Attach to selected session
+                        if let Some(session) = app.selected_session() {
+                            let mut cmd = app.session_manager().attach_command(session);
+                            tui::restore()?;
+                            let _ = cmd.status();
+                            terminal = tui::init()?;
+                            let _ = bg_tx.send(BgRequest::Refresh);
+                            continue;
+                        }
+                    } else if key.code == crossterm::event::KeyCode::Char('n')
+                        && !app.search_mode
+                        && app.confirm_kill.is_none()
+                    {
+                        // Spawn new session
+                        if let Some(provider_id) = app.default_provider_id() {
+                            let cwd = std::env::current_dir().unwrap_or_default();
+                            match app.session_manager().spawn(&provider_id, &cwd) {
+                                Ok(session_name) => {
+                                    let mut cmd = TmuxController::attach_command(&session_name);
+                                    tui::restore()?;
+                                    let _ = cmd.status();
+                                    terminal = tui::init()?;
+                                    let _ = bg_tx.send(BgRequest::Refresh);
                                 }
-                                continue;
-                            }
-                        } else {
-                            // Fallback: suspend-exec mode
-                            if let Some(action) = app.resume_selected() {
-                                tui::restore()?;
-                                let mut cmd = Command::new(&action.program);
-                                cmd.args(&action.args);
-                                if let Some(cwd) = &action.cwd {
-                                    cmd.current_dir(cwd);
+                                Err(e) => {
+                                    app.error_message = Some(format!("spawn failed: {e}"));
                                 }
-                                cmd.env_remove("CLAUDECODE");
-                                let _ = cmd.status();
-                                terminal = tui::init()?;
-                                app.refresh_sessions();
-                                continue;
                             }
+                            continue;
                         }
                     }
                     app.handle_key(key);
+
+                    // Send capture immediately on navigation (don't wait for next tick)
+                    if let Some(pane_id) = app.pending_preview.take() {
+                        let _ = bg_tx.send(BgRequest::Capture { pane_id });
+                    }
                 }
                 event::AppEvent::Tick => {
-                    // In tmux mode, check if agent pane is still alive
-                    if tmux_mode && app.agent_running {
-                        let alive = app.tmux.as_ref().map_or(false, |t| t.is_agent_alive());
-                        if !alive {
-                            app.agent_running = false;
-                            app.refresh_sessions();
-                        }
+                    tick_counter += 1;
+                    preview_counter += 1;
+
+                    if tick_counter >= REFRESH_INTERVAL_TICKS {
+                        tick_counter = 0;
+                        let _ = bg_tx.send(BgRequest::Refresh);
+                        preview_counter = 0;
+                    } else if preview_counter >= PREVIEW_INTERVAL_TICKS {
+                        preview_counter = 0;
+                        app.refresh_preview();
                     }
                 }
             }
         }
     }
 
-    // Kill agent pane on quit
-    if let Some(ref mut tmux) = app.tmux {
-        tmux.kill_agent();
-    }
+    // Shutdown background worker
+    let _ = bg_tx.send(BgRequest::Shutdown);
+    let _ = bg_handle.join();
 
     tui::restore()?;
     Ok(())
 }
 
 fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
+    let title = app
+        .selected_session()
+        .map(|s| format!(" {} — {} ", s.provider, s.cwd.display()))
+        .unwrap_or_else(|| " LazyAgent ".into());
+
     let block = Block::default()
-        .title(" LazyAgent ")
+        .title(title)
         .title_style(Theme::title())
         .borders(Borders::ALL)
         .border_style(Theme::border_unfocused());
 
-    let content = if let Some(ref msg) = app.health_message {
-        vec![
-            Line::from(""),
-            Line::from(Span::styled(msg.as_str(), Theme::error())),
-        ]
+    if let Some(ref preview) = app.pane_preview {
+        // Parse ANSI escape codes into styled ratatui Text
+        let text: Text = preview
+            .as_bytes()
+            .into_text()
+            .unwrap_or_else(|_| Text::raw(preview));
+
+        let paragraph = Paragraph::new(text).block(block);
+        frame.render_widget(paragraph, area);
     } else if let Some(ref err) = app.error_message {
-        vec![
+        let content = vec![
             Line::from(""),
             Line::from(Span::styled(err.as_str(), Theme::error())),
-        ]
-    } else if app.sidebar_items.is_empty() {
-        vec![
+        ];
+        let paragraph = Paragraph::new(content).block(block);
+        frame.render_widget(paragraph, area);
+    } else if app.sessions.is_empty() {
+        let content = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  No sessions found.",
+                "  No active agent sessions found.",
                 Theme::label(),
             )),
             Line::from(Span::styled(
-                "  Start a Claude Code session first.",
+                "  Press 'n' to start a new session.",
                 Theme::label(),
             )),
-        ]
+        ];
+        let paragraph = Paragraph::new(content).block(block);
+        frame.render_widget(paragraph, area);
     } else {
-        vec![
+        let content = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  Press Enter to resume selected session",
+                "  Select a session to preview",
                 Theme::label(),
             )),
-            Line::from(Span::styled(
-                "  The agent will run in this terminal",
-                Theme::label(),
-            )),
-        ]
-    };
-
-    let paragraph = Paragraph::new(content).block(block);
-    frame.render_widget(paragraph, area);
+        ];
+        let paragraph = Paragraph::new(content).block(block);
+        frame.render_widget(paragraph, area);
+    }
 }
 
 #[cfg(test)]

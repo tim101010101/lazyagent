@@ -1,45 +1,21 @@
+use std::collections::HashMap;
+use std::path::PathBuf;
 use std::process::Command;
+use std::time::SystemTime;
 
-#[cfg(unix)]
-use std::os::unix::process::CommandExt;
+use crate::protocol::{
+    AgentSession, AgentStatus, ExecPlan, Provider, SessionKind, SessionSource,
+};
 
-use crate::protocol::ExecPlan;
+const SESSION_PREFIX: &str = "la/";
 
-const ENV_NO_TMUX: &str = "LAZYAGENT_NO_TMUX";
-
-pub struct TmuxController {
-    #[allow(dead_code)]
-    self_pane_id: String,
-    agent_pane_id: Option<String>,
-}
+pub struct TmuxController;
 
 impl TmuxController {
-    /// Returns Some if running inside tmux, None otherwise.
-    pub fn detect() -> Option<Self> {
-        if std::env::var(ENV_NO_TMUX).is_ok() {
-            return None;
-        }
-        if std::env::var("TMUX").is_err() {
-            return None;
-        }
-        let output = Command::new("tmux")
-            .args(["display-message", "-p", "#{pane_id}"])
-            .output()
-            .ok()?;
-        if !output.status.success() {
-            return None;
-        }
-        let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if pane_id.is_empty() {
-            return None;
-        }
-        Some(Self {
-            self_pane_id: pane_id,
-            agent_pane_id: None,
-        })
+    pub fn detect() -> bool {
+        std::env::var("TMUX").is_ok()
     }
 
-    /// Returns true if tmux binary is available on PATH.
     pub fn tmux_available() -> bool {
         Command::new("tmux")
             .arg("-V")
@@ -48,135 +24,273 @@ impl TmuxController {
             .unwrap_or(false)
     }
 
-    /// Exec into a new tmux session running lazyagent. Never returns on success.
-    #[cfg(unix)]
-    pub fn auto_start() -> ! {
-        let exe = std::env::current_exe().unwrap_or_else(|_| "lazyagent".into());
-        let exe_str = exe.to_str().unwrap_or("lazyagent");
-        let err = Command::new("tmux")
-            .args(["new-session", "-s", "lazyagent", "--", exe_str])
-            .exec();
-        eprintln!("failed to exec tmux: {err}");
-        std::process::exit(1);
+    pub fn discover_sessions(providers: &[Box<dyn Provider>]) -> Vec<AgentSession> {
+        let output = match Command::new("tmux")
+            .args([
+                "list-panes",
+                "-a",
+                "-F",
+                "#{session_name} #{pane_id} #{pane_pid} #{pane_current_command} #{pane_current_path} #{session_created}",
+            ])
+            .output()
+        {
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+            _ => return Vec::new(),
+        };
+
+        // Build process tree once for all panes
+        let proc_tree = build_process_tree();
+
+        let mut sessions = Vec::new();
+
+        for line in output.lines() {
+            let parts: Vec<&str> = line.splitn(6, ' ').collect();
+            if parts.len() < 5 {
+                continue;
+            }
+
+            let session_name = parts[0];
+            let pane_id = parts[1];
+            let pane_pid = parts[2];
+            let pane_cmd = parts[3];
+            let pane_path = parts[4];
+            let session_created = parts.get(5).unwrap_or(&"");
+
+            // Check if pane command directly matches a provider
+            let mut matched_provider: Option<String> = None;
+            for provider in providers {
+                if provider.match_process(pane_cmd) {
+                    matched_provider = Some(provider.manifest().id);
+                    break;
+                }
+            }
+
+            // If pane command doesn't match, check descendant processes via in-memory tree
+            if matched_provider.is_none() {
+                let descendants = find_descendant_commands(pane_pid, &proc_tree);
+                'outer: for child_cmd in &descendants {
+                    for provider in providers {
+                        if provider.match_process(child_cmd) {
+                            matched_provider = Some(provider.manifest().id);
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+
+            let provider_id = match matched_provider {
+                Some(id) => id,
+                None => continue,
+            };
+
+            let kind = if session_name.starts_with(SESSION_PREFIX) {
+                SessionKind::Managed
+            } else {
+                SessionKind::Discovered
+            };
+
+            // Detect status via capture-pane
+            let status = capture_pane_status(pane_id, providers, &provider_id);
+
+            let started_at = session_created
+                .parse::<u64>()
+                .ok()
+                .map(|secs| SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs));
+
+            sessions.push(AgentSession {
+                kind,
+                tmux_session: session_name.to_string(),
+                tmux_pane: pane_id.to_string(),
+                provider: provider_id,
+                cwd: PathBuf::from(pane_path),
+                status,
+                started_at,
+                source: SessionSource::Local,
+            });
+        }
+
+        sessions
     }
 
-    /// Launch agent command in a split pane to the right (~70% width).
-    pub fn launch_agent(&mut self, plan: &ExecPlan) -> anyhow::Result<()> {
-        // Kill existing agent pane if any
-        self.kill_agent();
+    pub fn spawn_session(plan: &ExecPlan, provider_id: &str, dir_name: &str) -> anyhow::Result<String> {
+        let session_name = format!("{}{}/{}", SESSION_PREFIX, provider_id, dir_name);
+        let cwd = plan.cwd.as_deref().unwrap_or(".");
 
         let mut cmd_parts = vec![plan.program.clone()];
         cmd_parts.extend(plan.args.clone());
+
         let shell_cmd = cmd_parts
             .iter()
             .map(|s| shell_escape(s))
             .collect::<Vec<_>>()
             .join(" ");
 
-        let cwd = plan
-            .cwd
-            .as_deref()
-            .unwrap_or(".");
+        let mut tmux_args = vec![
+            "new-session".to_string(),
+            "-d".to_string(),
+            "-s".to_string(),
+            session_name.clone(),
+            "-c".to_string(),
+            cwd.to_string(),
+            "--".to_string(),
+        ];
 
-        let mut tmux_cmd = Command::new("tmux");
-        tmux_cmd.args([
-            "split-window",
-            "-h",
-            "-l", "70%",
-            "-d",
-            "-P",
-            "-F", "#{pane_id}",
-            "-c", cwd,
-            "--",
-        ]);
-
-        // Build env-setting wrapper: env -u CLAUDECODE <extra_env> <shell_cmd>
-        let mut env_parts = vec!["env".to_string(), "-u".to_string(), "CLAUDECODE".to_string()];
-        for (k, v) in &plan.env {
-            env_parts.push(format!("{k}={v}"));
-        }
-        env_parts.push("sh".to_string());
-        env_parts.push("-c".to_string());
-        env_parts.push(shell_cmd);
-
-        let full_cmd = env_parts
-            .iter()
-            .map(|s| shell_escape(s))
-            .collect::<Vec<_>>()
-            .join(" ");
-
-        tmux_cmd.args(["sh", "-c", &full_cmd]);
-
-        let output = tmux_cmd.output()?;
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("tmux split-window failed: {stderr}");
-        }
-
-        let pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        self.agent_pane_id = Some(pane_id);
-        Ok(())
-    }
-
-    /// Kill the agent pane if it exists.
-    pub fn kill_agent(&mut self) {
-        if let Some(ref pane_id) = self.agent_pane_id.take() {
-            let _ = Command::new("tmux")
-                .args(["kill-pane", "-t", pane_id])
-                .output();
-        }
-    }
-
-    /// Check if the agent pane is still alive.
-    pub fn is_agent_alive(&self) -> bool {
-        let pane_id = match &self.agent_pane_id {
-            Some(id) => id,
-            None => return false,
-        };
-        let output = Command::new("tmux")
-            .args(["list-panes", "-F", "#{pane_id}"])
-            .output();
-        match output {
-            Ok(o) => {
-                let stdout = String::from_utf8_lossy(&o.stdout);
-                stdout.lines().any(|line| line.trim() == pane_id)
+        // Build env wrapper if needed
+        if plan.env.is_empty() {
+            tmux_args.push("sh".to_string());
+            tmux_args.push("-c".to_string());
+            tmux_args.push(shell_cmd);
+        } else {
+            let mut env_parts = vec!["env".to_string()];
+            for (k, v) in &plan.env {
+                env_parts.push(format!("{k}={v}"));
             }
-            Err(_) => false,
-        }
-    }
+            env_parts.push("sh".to_string());
+            env_parts.push("-c".to_string());
+            env_parts.push(shell_cmd);
 
-    /// Focus the agent pane.
-    pub fn focus_agent(&self) -> anyhow::Result<()> {
-        if let Some(ref pane_id) = self.agent_pane_id {
-            let output = Command::new("tmux")
-                .args(["select-pane", "-t", pane_id])
-                .output()?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("tmux select-pane failed: {stderr}");
-            }
-        }
-        Ok(())
-    }
+            let full_cmd = env_parts
+                .iter()
+                .map(|s| shell_escape(s))
+                .collect::<Vec<_>>()
+                .join(" ");
 
-    /// Focus back to self pane.
-    #[allow(dead_code)]
-    pub fn focus_self(&self) -> anyhow::Result<()> {
+            tmux_args.push("sh".to_string());
+            tmux_args.push("-c".to_string());
+            tmux_args.push(full_cmd);
+        }
+
         let output = Command::new("tmux")
-            .args(["select-pane", "-t", &self.self_pane_id])
+            .args(&tmux_args)
             .output()?;
+
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("tmux select-pane failed: {stderr}");
+            anyhow::bail!("tmux new-session failed: {stderr}");
         }
+
+        Ok(session_name)
+    }
+
+    pub fn attach_command(session_name: &str) -> Command {
+        let mut cmd = Command::new("tmux");
+        cmd.args(["attach-session", "-t", session_name]);
+        cmd
+    }
+
+    /// Capture the full visible content of a tmux pane with ANSI colors.
+    pub fn capture_pane(pane_id: &str) -> Option<String> {
+        let output = Command::new("tmux")
+            .args(["capture-pane", "-p", "-e", "-t", pane_id])
+            .output()
+            .ok()?;
+
+        if !output.status.success() {
+            return None;
+        }
+
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    pub fn kill_session(session_name: &str) -> anyhow::Result<()> {
+        let output = Command::new("tmux")
+            .args(["kill-session", "-t", session_name])
+            .output()?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("tmux kill-session failed: {stderr}");
+        }
+
         Ok(())
     }
 }
 
-/// Simple shell escaping: wrap in single quotes, escape existing single quotes.
+/// Build a process tree from a single `ps -eo` call.
+/// Returns ppid → [(pid, comm)].
+fn build_process_tree() -> HashMap<String, Vec<(String, String)>> {
+    let output = match Command::new("ps")
+        .args(["-eo", "pid=,ppid=,comm="])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return HashMap::new(),
+    };
+
+    let mut tree: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    for line in output.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        if parts.len() >= 3 {
+            let pid = parts[0].to_string();
+            let ppid = parts[1].to_string();
+            let comm = parts[2..].join(" ");
+            tree.entry(ppid).or_default().push((pid, comm));
+        }
+    }
+    tree
+}
+
+/// Walk the process tree in-memory (BFS) to find descendant command names.
+fn find_descendant_commands(pid: &str, tree: &HashMap<String, Vec<(String, String)>>) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut queue = vec![pid.to_string()];
+
+    while let Some(current) = queue.pop() {
+        if let Some(children) = tree.get(&current) {
+            for (child_pid, comm) in children {
+                result.push(comm.clone());
+                queue.push(child_pid.clone());
+            }
+        }
+    }
+
+    result
+}
+
+fn capture_pane_status(
+    pane_id: &str,
+    providers: &[Box<dyn Provider>],
+    provider_id: &str,
+) -> AgentStatus {
+    let output = match Command::new("tmux")
+        .args(["capture-pane", "-p", "-t", pane_id, "-S", "-5"])
+        .output()
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
+        _ => return AgentStatus::Unknown,
+    };
+
+    for provider in providers {
+        if provider.manifest().id == provider_id {
+            return provider.detect_status(&output);
+        }
+    }
+
+    AgentStatus::Unknown
+}
+
 fn shell_escape(s: &str) -> String {
-    if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/') {
+    if s.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' || c == '/')
+    {
         return s.to_string();
     }
     format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_shell_escape_simple() {
+        assert_eq!(shell_escape("hello"), "hello");
+        assert_eq!(shell_escape("/usr/bin/claude"), "/usr/bin/claude");
+    }
+
+    #[test]
+    fn test_shell_escape_special_chars() {
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
 }
