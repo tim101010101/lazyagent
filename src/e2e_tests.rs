@@ -4,7 +4,8 @@ use std::time::SystemTime;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{backend::TestBackend, Terminal};
 
-use crate::app::{App, SidebarItem};
+use crate::app::{App, GroupingMode, SidebarItem};
+use crate::config::CustomGroup;
 use crate::protocol::{
     AgentSession, AgentStatus, ExecPlan, Provider, ProviderManifest, SessionKind, SessionSource,
 };
@@ -86,21 +87,123 @@ fn key(code: KeyCode) -> KeyEvent {
 // ===== Tests =====
 
 #[test]
-fn test_sessions_grouped_by_project() {
+fn test_flat_mode_no_group_headers() {
     let app = make_app(vec![
         make_session("mock", "/code/proj-a/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
         make_session("mock", "/code/proj-a/api", AgentStatus::Thinking, "la/mock/api", SessionSource::Local, 200),
         make_session("mock", "/code/proj-b/web", AgentStatus::Idle, "la/mock/web", SessionSource::Local, 300),
     ]);
 
-    // Should have source header + project headers + sessions
+    // Default is flat — no group headers
+    assert_eq!(app.grouping_mode, GroupingMode::Flat);
     let source_headers = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::SourceHeader(_))).count();
-    let project_headers = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::ProjectHeader(_))).count();
+    let group_headers = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::GroupHeader(_))).count();
     let session_items = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::Session(_))).count();
 
     assert_eq!(source_headers, 1, "should have 1 source header (local)");
-    assert!(project_headers >= 2, "should have project headers for grouping");
+    assert_eq!(group_headers, 0, "flat mode should have no group headers");
     assert_eq!(session_items, 3, "should have 3 sessions");
+}
+
+#[test]
+fn test_git_root_mode_groups_by_root() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100),
+        make_session("mock", "/code/repo-a/lib", AgentStatus::Thinking, "la/mock/lib", SessionSource::Local, 200),
+        make_session("mock", "/code/repo-b/app", AgentStatus::Idle, "la/mock/app", SessionSource::Local, 300),
+    ]);
+
+    // Inject git root cache to avoid subprocess calls
+    app.set_git_root(PathBuf::from("/code/repo-a/src"), Some("repo-a".into()));
+    app.set_git_root(PathBuf::from("/code/repo-a/lib"), Some("repo-a".into()));
+    app.set_git_root(PathBuf::from("/code/repo-b/app"), Some("repo-b".into()));
+
+    app.grouping_mode = GroupingMode::GitRoot;
+    app.rebuild_sidebar();
+
+    let group_headers: Vec<_> = app.sidebar_items.iter()
+        .filter_map(|i| if let SidebarItem::GroupHeader(name) = i { Some(name.clone()) } else { None })
+        .collect();
+    assert_eq!(group_headers, vec!["repo-a", "repo-b"]);
+
+    let session_items = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::Session(_))).count();
+    assert_eq!(session_items, 3);
+}
+
+#[test]
+fn test_git_root_mode_ungrouped_bucket() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100),
+        make_session("mock", "/tmp/scratch", AgentStatus::Idle, "la/mock/scratch", SessionSource::Local, 200),
+    ]);
+
+    app.set_git_root(PathBuf::from("/code/repo-a/src"), Some("repo-a".into()));
+    app.set_git_root(PathBuf::from("/tmp/scratch"), None); // not a git dir
+
+    app.grouping_mode = GroupingMode::GitRoot;
+    app.rebuild_sidebar();
+
+    let group_headers: Vec<_> = app.sidebar_items.iter()
+        .filter_map(|i| if let SidebarItem::GroupHeader(name) = i { Some(name.clone()) } else { None })
+        .collect();
+    assert!(group_headers.contains(&"repo-a".to_string()));
+    assert!(group_headers.contains(&"ungrouped".to_string()));
+}
+
+#[test]
+fn test_custom_mode_pattern_matching() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/work/proj", AgentStatus::Waiting, "la/mock/proj", SessionSource::Local, 100),
+        make_session("mock", "/code/personal/blog", AgentStatus::Idle, "la/mock/blog", SessionSource::Local, 200),
+        make_session("mock", "/tmp/random", AgentStatus::Unknown, "la/mock/random", SessionSource::Local, 300),
+    ]);
+
+    app.custom_groups = vec![
+        CustomGroup { name: "Work".into(), patterns: vec!["**/work/**".into()] },
+        CustomGroup { name: "Personal".into(), patterns: vec!["**/personal/**".into()] },
+    ];
+    app.grouping_mode = GroupingMode::Custom;
+    app.rebuild_sidebar();
+
+    let group_headers: Vec<_> = app.sidebar_items.iter()
+        .filter_map(|i| if let SidebarItem::GroupHeader(name) = i { Some(name.clone()) } else { None })
+        .collect();
+    assert!(group_headers.contains(&"Work".to_string()));
+    assert!(group_headers.contains(&"Personal".to_string()));
+    assert!(group_headers.contains(&"other".to_string()), "unmatched should go to 'other'");
+}
+
+#[test]
+fn test_mode_cycling_skips_custom_when_no_groups() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+
+    // No custom groups — should skip custom
+    assert_eq!(app.grouping_mode, GroupingMode::Flat);
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.grouping_mode, GroupingMode::GitRoot);
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.grouping_mode, GroupingMode::Flat); // skipped custom
+}
+
+#[test]
+fn test_mode_cycling_includes_custom_when_groups_exist() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+
+    app.custom_groups = vec![
+        CustomGroup { name: "Work".into(), patterns: vec!["**/code/**".into()] },
+    ];
+
+    assert_eq!(app.grouping_mode, GroupingMode::Flat);
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.grouping_mode, GroupingMode::GitRoot);
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.grouping_mode, GroupingMode::Custom);
+    app.handle_key(key(KeyCode::Tab));
+    assert_eq!(app.grouping_mode, GroupingMode::Flat);
 }
 
 #[test]
@@ -126,6 +229,28 @@ fn test_navigation_skips_headers() {
         assert!(
             matches!(app.sidebar_items.get(app.selected_index), Some(SidebarItem::Session(_))),
             "k landed on non-session at index {}",
+            app.selected_index
+        );
+    }
+}
+
+#[test]
+fn test_navigation_skips_headers_git_mode() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100),
+        make_session("mock", "/code/repo-b/app", AgentStatus::Idle, "la/mock/app", SessionSource::Local, 200),
+    ]);
+
+    app.set_git_root(PathBuf::from("/code/repo-a/src"), Some("repo-a".into()));
+    app.set_git_root(PathBuf::from("/code/repo-b/app"), Some("repo-b".into()));
+    app.grouping_mode = GroupingMode::GitRoot;
+    app.rebuild_sidebar();
+
+    for _ in 0..10 {
+        app.handle_key(key(KeyCode::Char('j')));
+        assert!(
+            matches!(app.sidebar_items.get(app.selected_index), Some(SidebarItem::Session(_))),
+            "j landed on non-session at index {}",
             app.selected_index
         );
     }
@@ -192,6 +317,7 @@ fn test_status_icons_render() {
                 &app.sessions,
                 app.selected_index,
                 true,
+                &app.grouping_mode,
             );
         })
         .unwrap();
@@ -265,6 +391,7 @@ fn test_cjk_rendering_safety() {
                 &app.sessions,
                 app.selected_index,
                 true,
+                &app.grouping_mode,
             );
         })
         .unwrap();
@@ -343,7 +470,15 @@ fn test_render_narrow_terminal() {
                 &app.sessions,
                 app.selected_index,
                 true,
+                &app.grouping_mode,
             );
         })
         .unwrap();
+}
+
+#[test]
+fn test_grouping_mode_label() {
+    assert_eq!(GroupingMode::Flat.label(), "flat");
+    assert_eq!(GroupingMode::GitRoot.label(), "git");
+    assert_eq!(GroupingMode::Custom.label(), "custom");
 }

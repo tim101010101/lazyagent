@@ -7,38 +7,26 @@ use ratatui::{
 
 use crate::tui::theme::Theme;
 
-pub fn render_with_mode(
+pub fn render(
     frame: &mut Frame,
     area: Rect,
     search_mode: bool,
     search_query: &str,
-    tmux_mode: bool,
-    agent_running: bool,
+    confirm_mode: bool,
 ) {
-    let hints = if search_mode {
-        vec![
-            ("Enter", "apply"),
-            ("Esc", "cancel"),
-        ]
-    } else if tmux_mode {
-        let mut h = vec![
-            ("j/k", "nav"),
-            ("Enter", "resume"),
-            ("l/h", "detail"),
-            ("/", "search"),
-        ];
-        if agent_running {
-            h.push(("prefix+\u{2190}", "agent"));
-        }
-        h.push(("q", "quit"));
-        h
+    let hints = if confirm_mode {
+        vec![("y", "confirm"), ("n", "cancel")]
+    } else if search_mode {
+        vec![("Enter", "apply"), ("Esc", "cancel")]
     } else {
         vec![
             ("j/k", "nav"),
-            ("Enter", "resume"),
-            ("l", "detail"),
-            ("h", "hide"),
+            ("Enter", "attach"),
+            ("n", "new"),
+            ("d", "kill"),
             ("/", "search"),
+            ("Tab", "group"),
+            ("l/h", "detail"),
             ("q", "quit"),
         ]
     };
@@ -49,6 +37,10 @@ pub fn render_with_mode(
         spans.push(Span::styled(" /", Theme::title()));
         spans.push(Span::styled(search_query, Theme::value()));
         spans.push(Span::styled("  ", Theme::key_hint()));
+    }
+
+    if confirm_mode {
+        spans.push(Span::styled(" Kill session? ", Theme::error()));
     }
 
     for (i, (key, action)) in hints.iter().enumerate() {

@@ -1,5 +1,6 @@
 mod app;
 mod bg;
+mod config;
 mod event;
 mod protocol;
 mod provider;
@@ -48,6 +49,7 @@ fn main() -> anyhow::Result<()> {
     let providers: Vec<Box<dyn protocol::Provider>> = vec![Box::new(ClaudeProvider::new())];
     let session_manager = SessionManager::new(providers);
     let mut app = App::new(session_manager);
+    app.load_config();
 
     // Background worker with its own provider instances
     let bg_providers: Vec<Box<dyn protocol::Provider>> = vec![Box::new(ClaudeProvider::new())];
@@ -83,6 +85,7 @@ fn main() -> anyhow::Result<()> {
                 &app.sessions,
                 app.selected_index,
                 true,
+                &app.grouping_mode,
             );
 
             // Main area — pane preview

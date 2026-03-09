@@ -1,15 +1,54 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::bg::BgUpdate;
+use crate::config::{self, CustomGroup};
 use crate::protocol::{AgentSession, SessionSource};
 use crate::session::SessionManager;
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum GroupingMode {
+    Flat,
+    GitRoot,
+    Custom,
+}
+
+impl GroupingMode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            GroupingMode::Flat => "flat",
+            GroupingMode::GitRoot => "git",
+            GroupingMode::Custom => "custom",
+        }
+    }
+
+    pub fn label(&self) -> &'static str {
+        self.as_str()
+    }
+
+    /// Cycle to next mode. Skips Custom if no custom groups configured.
+    pub fn cycle(&self, has_custom_groups: bool) -> GroupingMode {
+        match self {
+            GroupingMode::Flat => GroupingMode::GitRoot,
+            GroupingMode::GitRoot => {
+                if has_custom_groups {
+                    GroupingMode::Custom
+                } else {
+                    GroupingMode::Flat
+                }
+            }
+            GroupingMode::Custom => GroupingMode::Flat,
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum SidebarItem {
     SourceHeader(String),
-    ProjectHeader(String),
+    GroupHeader(String),
     Session(usize), // index into sessions vec
 }
 
@@ -26,6 +65,9 @@ pub struct App {
     pub pane_preview: Option<String>,
     pub preview_cache: HashMap<String, String>,
     pub pending_preview: Option<String>,
+    pub grouping_mode: GroupingMode,
+    pub custom_groups: Vec<CustomGroup>,
+    git_root_cache: HashMap<PathBuf, Option<String>>,
     session_manager: SessionManager,
 }
 
@@ -44,7 +86,21 @@ impl App {
             pane_preview: None,
             preview_cache: HashMap::new(),
             pending_preview: None,
+            grouping_mode: GroupingMode::Flat,
+            custom_groups: Vec::new(),
+            git_root_cache: HashMap::new(),
             session_manager,
+        }
+    }
+
+    /// Load grouping mode and custom groups from config.
+    pub fn load_config(&mut self) {
+        let cfg = config::load_config();
+        self.grouping_mode = cfg.grouping_mode();
+        self.custom_groups = cfg.group;
+        // If custom mode but no groups configured, fall back to flat
+        if self.grouping_mode == GroupingMode::Custom && self.custom_groups.is_empty() {
+            self.grouping_mode = GroupingMode::Flat;
         }
     }
 
@@ -62,41 +118,41 @@ impl App {
         // Sort by started_at descending (most recent first)
         sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
-        // Group by source → cwd parent
+        self.sessions = sessions;
+        self.rebuild_sidebar();
+    }
+
+    /// Rebuild sidebar items from current sessions without re-polling.
+    pub fn rebuild_sidebar(&mut self) {
         self.sidebar_items.clear();
 
-        // Collect sources
-        let mut local_sessions: Vec<(usize, &AgentSession)> = Vec::new();
-        let mut remote_groups: std::collections::BTreeMap<String, Vec<(usize, &AgentSession)>> =
+        // Split by source
+        let mut local_indices: Vec<usize> = Vec::new();
+        let mut remote_groups: std::collections::BTreeMap<String, Vec<usize>> =
             std::collections::BTreeMap::new();
 
-        for (i, session) in sessions.iter().enumerate() {
+        for (i, session) in self.sessions.iter().enumerate() {
             match &session.source {
-                SessionSource::Local => local_sessions.push((i, session)),
+                SessionSource::Local => local_indices.push(i),
                 SessionSource::Remote { host } => {
-                    remote_groups
-                        .entry(host.clone())
-                        .or_default()
-                        .push((i, session));
+                    remote_groups.entry(host.clone()).or_default().push(i);
                 }
             }
         }
 
         // Build local section
-        if !local_sessions.is_empty() {
+        if !local_indices.is_empty() {
             self.sidebar_items
                 .push(SidebarItem::SourceHeader("local".into()));
-            self.build_project_groups(&local_sessions);
+            self.build_group_items(&local_indices);
         }
 
         // Build remote sections
-        for (host, group) in &remote_groups {
+        for (host, indices) in &remote_groups {
             self.sidebar_items
                 .push(SidebarItem::SourceHeader(host.clone()));
-            self.build_project_groups(group);
+            self.build_group_items(indices);
         }
-
-        self.sessions = sessions;
 
         // Adjust selection
         if self.selected_index >= self.sidebar_items.len() {
@@ -104,6 +160,107 @@ impl App {
         }
         self.skip_to_nearest_session();
         self.update_preview_from_cache();
+    }
+
+    /// Build group items for a set of session indices based on current grouping mode.
+    fn build_group_items(&mut self, indices: &[usize]) {
+        match self.grouping_mode {
+            GroupingMode::Flat => self.build_flat(indices),
+            GroupingMode::GitRoot => self.build_git_root_groups(indices),
+            GroupingMode::Custom => self.build_custom_groups(indices),
+        }
+    }
+
+    fn build_flat(&mut self, indices: &[usize]) {
+        for &idx in indices {
+            self.sidebar_items.push(SidebarItem::Session(idx));
+        }
+    }
+
+    fn build_git_root_groups(&mut self, indices: &[usize]) {
+        let mut by_root: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+
+        for &idx in indices {
+            let root = self.resolve_git_root(&self.sessions[idx].cwd.clone());
+            let key = root.unwrap_or_else(|| "ungrouped".into());
+            by_root.entry(key).or_default().push(idx);
+        }
+
+        for (root, group_indices) in &by_root {
+            self.sidebar_items
+                .push(SidebarItem::GroupHeader(root.clone()));
+            for &idx in group_indices {
+                self.sidebar_items.push(SidebarItem::Session(idx));
+            }
+        }
+    }
+
+    fn build_custom_groups(&mut self, indices: &[usize]) {
+        let mut grouped: std::collections::BTreeMap<String, Vec<usize>> =
+            std::collections::BTreeMap::new();
+        let mut other: Vec<usize> = Vec::new();
+
+        for &idx in indices {
+            let cwd_str = self.sessions[idx].cwd.to_string_lossy().to_string();
+            let mut matched = false;
+            for cg in &self.custom_groups {
+                for pattern in &cg.patterns {
+                    if glob_match::glob_match(pattern, &cwd_str) {
+                        grouped.entry(cg.name.clone()).or_default().push(idx);
+                        matched = true;
+                        break;
+                    }
+                }
+                if matched {
+                    break;
+                }
+            }
+            if !matched {
+                other.push(idx);
+            }
+        }
+
+        for (name, group_indices) in &grouped {
+            self.sidebar_items
+                .push(SidebarItem::GroupHeader(name.clone()));
+            for &idx in group_indices {
+                self.sidebar_items.push(SidebarItem::Session(idx));
+            }
+        }
+
+        if !other.is_empty() {
+            self.sidebar_items
+                .push(SidebarItem::GroupHeader("other".into()));
+            for &idx in &other {
+                self.sidebar_items.push(SidebarItem::Session(idx));
+            }
+        }
+    }
+
+    /// Resolve git root for a path, using cache.
+    fn resolve_git_root(&mut self, cwd: &Path) -> Option<String> {
+        if let Some(cached) = self.git_root_cache.get(cwd) {
+            return cached.clone();
+        }
+
+        let result = Command::new("git")
+            .args(["rev-parse", "--show-toplevel"])
+            .current_dir(cwd)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| {
+                let full = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                // Use just the directory name as the group label
+                Path::new(&full)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or(full)
+            });
+
+        self.git_root_cache.insert(cwd.to_path_buf(), result.clone());
+        result
     }
 
     /// Apply a background update (sessions or preview).
@@ -125,7 +282,6 @@ impl App {
                 self.pane_preview = Some(cached.clone());
                 self.pending_preview = None;
             } else {
-                // Show stale preview while waiting
                 self.pending_preview = Some(pane_id);
             }
         } else {
@@ -141,31 +297,8 @@ impl App {
     }
 
     pub fn refresh_preview(&mut self) {
-        // Request preview for current selection via pending_preview
         if let Some(session) = self.selected_session() {
             self.pending_preview = Some(session.tmux_pane.clone());
-        }
-    }
-
-    fn build_project_groups(&mut self, sessions: &[(usize, &AgentSession)]) {
-        let mut by_project: std::collections::BTreeMap<String, Vec<usize>> =
-            std::collections::BTreeMap::new();
-
-        for (idx, session) in sessions {
-            let parent = session
-                .cwd
-                .parent()
-                .map(|p| p.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "/".into());
-            by_project.entry(parent).or_default().push(*idx);
-        }
-
-        for (project, indices) in &by_project {
-            self.sidebar_items
-                .push(SidebarItem::ProjectHeader(project.clone()));
-            for &idx in indices {
-                self.sidebar_items.push(SidebarItem::Session(idx));
-            }
         }
     }
 
@@ -258,10 +391,19 @@ impl App {
                 self.search_query.clear();
             }
             KeyCode::Char('r') => self.refresh_sessions(),
+            KeyCode::Tab => self.cycle_grouping_mode(),
             // Enter and 'n' handled in main.rs
             KeyCode::Enter | KeyCode::Char('n') => {}
             _ => {}
         }
+    }
+
+    fn cycle_grouping_mode(&mut self) {
+        let has_custom = !self.custom_groups.is_empty();
+        self.grouping_mode = self.grouping_mode.cycle(has_custom);
+        self.rebuild_sidebar();
+        // Save to config (best-effort)
+        let _ = config::save_grouping_mode(&self.grouping_mode);
     }
 
     fn handle_search_key(&mut self, key: KeyEvent) {
@@ -321,7 +463,6 @@ impl App {
     fn move_to_bottom(&mut self) {
         if !self.sidebar_items.is_empty() {
             self.selected_index = self.sidebar_items.len() - 1;
-            // If last item is a header, move up
             if !matches!(
                 self.sidebar_items.get(self.selected_index),
                 Some(SidebarItem::Session(_))
@@ -346,5 +487,11 @@ impl App {
             .providers()
             .first()
             .map(|p| p.manifest().id)
+    }
+
+    /// Inject a git root into the cache (for testing without subprocess).
+    #[cfg(test)]
+    pub fn set_git_root(&mut self, cwd: PathBuf, root: Option<String>) {
+        self.git_root_cache.insert(cwd, root);
     }
 }
