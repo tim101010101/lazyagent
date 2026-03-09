@@ -145,7 +145,11 @@ impl Provider for CodexProvider {
     }
 
     fn match_process(&self, process_name: &str) -> bool {
-        let matched = process_name == "codex";
+        let name = Path::new(process_name)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or(process_name);
+        let matched = name == "codex";
         trace!(process_name, matched, "codex match_process");
         matched
     }
@@ -179,6 +183,7 @@ mod tests {
     fn test_match_process() {
         let p = CodexProvider::new();
         assert!(p.match_process("codex"));
+        assert!(p.match_process("/Users/didi/.bun/install/global/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex"));
         assert!(!p.match_process("claude"));
         assert!(!p.match_process("node"));
     }
