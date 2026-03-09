@@ -6,6 +6,7 @@ pub mod timing;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
+use tracing::{debug, warn};
 
 use crate::app::GroupingMode;
 
@@ -51,10 +52,11 @@ pub fn load_config() -> Config {
     let Ok(content) = std::fs::read_to_string(&path) else {
         return Config::default();
     };
+    debug!(path = %path.display(), "loading config");
     match toml::from_str(&content) {
         Ok(cfg) => cfg,
         Err(e) => {
-            eprintln!("lazyagent: config parse error: {e}, using defaults");
+            warn!(path = %path.display(), err = %e, "config parse failed, using defaults");
             Config::default()
         }
     }

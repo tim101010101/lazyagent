@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 use rayon::prelude::*;
 use tracing::{debug, trace, warn};
@@ -28,6 +28,7 @@ impl TmuxController {
     }
 
     pub fn discover_sessions(providers: &[Box<dyn Provider>]) -> Vec<AgentSession> {
+        let start = Instant::now();
         let output = match Command::new("tmux")
             .args([
                 "list-panes",
@@ -38,8 +39,13 @@ impl TmuxController {
             .output()
         {
             Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-            _ => {
-                warn!("tmux list-panes failed");
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                warn!(stderr = %stderr, "tmux list-panes failed");
+                return Vec::new();
+            }
+            Err(e) => {
+                warn!(err = %e, "tmux list-panes failed");
                 return Vec::new();
             }
         };
@@ -121,11 +127,12 @@ impl TmuxController {
         debug!(count = matched.len(), "matched panes for status detection");
 
         // Phase 2: parallel capture-pane + git root resolution
-        matched
+        let sessions: Vec<AgentSession> = matched
             .par_iter()
             .map(|m| {
                 let status = capture_pane_status(&m.pane_id, providers, &m.provider_id);
                 let git_root = resolve_git_root(Path::new(&m.pane_path));
+                trace!(pane_id = %m.pane_id, git_root = ?git_root, "resolved git root");
 
                 let started_at = m
                     .session_created
@@ -145,7 +152,11 @@ impl TmuxController {
                     git_root,
                 }
             })
-            .collect()
+            .collect();
+
+        let elapsed_ms = start.elapsed().as_millis();
+        debug!(elapsed_ms, total = sessions.len(), "discovery complete");
+        sessions
     }
 
     pub fn spawn_session(plan: &ExecPlan, provider_id: &str, dir_name: &str) -> anyhow::Result<String> {
@@ -206,6 +217,7 @@ impl TmuxController {
             anyhow::bail!("tmux new-session failed: {stderr}");
         }
 
+        debug!(session = %session_name, "tmux session spawned");
         Ok(session_name)
     }
 
@@ -262,6 +274,7 @@ impl TmuxController {
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
+            warn!(session = %session_name, stderr = %stderr, "tmux kill-session failed");
             anyhow::bail!("tmux kill-session failed: {stderr}");
         }
 
@@ -290,6 +303,7 @@ fn build_process_tree() -> HashMap<String, Vec<(String, String)>> {
             tree.entry(ppid).or_default().push((pid, comm));
         }
     }
+    debug!(proc_tree_size = tree.len(), "process tree built");
     tree
 }
 

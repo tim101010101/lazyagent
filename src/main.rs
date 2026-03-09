@@ -19,7 +19,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
-use tracing::{error, info};
+use tracing::{debug, error, info, warn};
 
 use app::App;
 use bg::BgRequest;
@@ -62,6 +62,7 @@ fn main() -> anyhow::Result<()> {
     let _ = bg_tx.send(BgRequest::Refresh);
 
     let mut terminal = tui::init()?;
+    debug!("tui initialized");
     let mut tick_counter: u32 = 0;
     let mut preview_counter: u32 = 0;
 
@@ -208,7 +209,9 @@ fn main() -> anyhow::Result<()> {
     let _ = bg_tx.send(BgRequest::Shutdown);
     let _ = bg_handle.join();
 
-    tui::restore()?;
+    if let Err(e) = tui::restore() {
+        warn!("tui restore failed: {e}");
+    }
     info!("lazyagent exiting");
     Ok(())
 }
@@ -219,6 +222,7 @@ fn handle_passthrough_key(app: &mut App, key: crossterm::event::KeyEvent, pane_i
         if let Some(first_esc) = app.last_esc_time {
             if first_esc.elapsed() < app.timing.double_esc_duration() {
                 // Double-Esc: exit passthrough (don't send second Esc)
+                info!("exited passthrough");
                 app.exit_passthrough();
                 return;
             }

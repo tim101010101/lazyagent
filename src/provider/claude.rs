@@ -1,15 +1,41 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use tracing::{debug, trace};
+use tracing::trace;
 
-use crate::protocol::{AgentStatus, ExecPlan, Provider, ProviderManifest};
+use crate::protocol::{
+    AgentStatus, ExecPlan, LineMatcher, Provider, ProviderManifest, StatusResolver, StatusRule,
+    TextMatchResolver,
+};
 
-pub struct ClaudeProvider;
+static CLAUDE_TEXT_RULES: &[StatusRule] = &[
+    StatusRule {
+        status: AgentStatus::Thinking,
+        matcher: LineMatcher::EndsWith("thinking)"),
+    },
+    StatusRule {
+        status: AgentStatus::Thinking,
+        matcher: LineMatcher::Contains("esc to interrupt"),
+    },
+    StatusRule {
+        status: AgentStatus::Waiting,
+        matcher: LineMatcher::StartsWith("❯"),
+    },
+];
+
+pub struct ClaudeProvider {
+    resolvers: Vec<Box<dyn StatusResolver>>,
+}
 
 impl ClaudeProvider {
     pub fn new() -> Self {
-        Self
+        let resolvers: Vec<Box<dyn StatusResolver>> = vec![Box::new(TextMatchResolver::new(
+            CLAUDE_TEXT_RULES,
+            20,
+            AgentStatus::Unknown,
+        ))];
+
+        Self { resolvers }
     }
 }
 
@@ -27,52 +53,8 @@ impl Provider for ClaudeProvider {
         matched
     }
 
-    fn detect_status(&self, pane_output: &str) -> AgentStatus {
-        let lines: Vec<&str> = pane_output
-            .lines()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .skip_while(|l| l.trim().is_empty())
-            .collect::<Vec<_>>();
-        let tail: Vec<&str> = lines.iter().take(20).copied().collect();
-
-        // Scan bottom of pane for Claude Code UI patterns
-        let mut has_prompt = false;
-        let mut has_thinking = false;
-
-        for line in &tail {
-            let trimmed = line.trim();
-
-            // Claude Code prompt: line starting with ❯ (U+276F)
-            if trimmed.starts_with('❯') {
-                has_prompt = true;
-            }
-
-            // Active thinking: status line with "thinking)" at end
-            // e.g. "✽ Gitifying… (1m 7s · ↑ 856 tokens · thinking)"
-            if trimmed.ends_with("thinking)") {
-                has_thinking = true;
-            }
-
-            // Active tool execution: "esc to interrupt" in status bar
-            if trimmed.contains("esc to interrupt") {
-                has_thinking = true;
-            }
-        }
-
-        if has_thinking {
-            debug!("detect_status: Thinking");
-            return AgentStatus::Thinking;
-        }
-
-        if has_prompt {
-            debug!("detect_status: Waiting");
-            return AgentStatus::Waiting;
-        }
-
-        debug!("detect_status: Unknown");
-        AgentStatus::Unknown
+    fn resolvers(&self) -> &[Box<dyn StatusResolver>] {
+        &self.resolvers
     }
 
     fn exec_plan(&self, cwd: &Path) -> ExecPlan {

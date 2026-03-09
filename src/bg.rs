@@ -1,7 +1,8 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
+use std::time::Instant;
 
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::protocol::{AgentSession, Provider};
 use crate::tmux::TmuxController;
@@ -24,23 +25,28 @@ pub fn spawn_worker(
     let (upd_tx, upd_rx) = mpsc::channel::<BgUpdate>();
 
     let handle = thread::spawn(move || {
+        info!("bg worker started");
         while let Ok(req) = req_rx.recv() {
             match req {
                 BgRequest::Refresh => {
-                    debug!("bg: refresh requested");
+                    debug!("refresh requested");
+                    let start = Instant::now();
                     let sessions = TmuxController::discover_sessions(&providers);
-                    debug!(count = sessions.len(), "bg: refresh complete");
+                    let elapsed_ms = start.elapsed().as_millis();
+                    debug!(count = sessions.len(), elapsed_ms, "refresh complete");
                     if upd_tx.send(BgUpdate::Sessions(sessions)).is_err() {
+                        warn!("bg channel closed unexpectedly");
                         break;
                     }
                 }
                 BgRequest::Capture { pane_id } => {
-                    debug!(pane_id = %pane_id, "bg: capture requested");
+                    debug!(pane_id = %pane_id, "capture requested");
                     if let Some(content) = TmuxController::capture_pane(&pane_id) {
                         if upd_tx
                             .send(BgUpdate::Preview { pane_id, content })
                             .is_err()
                         {
+                            warn!("bg channel closed unexpectedly");
                             break;
                         }
                     }
@@ -48,6 +54,7 @@ pub fn spawn_worker(
                 BgRequest::Shutdown => break,
             }
         }
+        debug!("bg worker shutdown");
     });
 
     (req_tx, upd_rx, handle)

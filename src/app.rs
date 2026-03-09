@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use tracing::{trace, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::bg::BgUpdate;
 use crate::config::{self, CustomGroup, KeyBindings, LayoutConfig, SidebarConfig, TimingConfig};
@@ -133,11 +133,13 @@ impl App {
                 s.provider.to_lowercase().contains(&q)
                     || s.cwd.to_string_lossy().to_lowercase().contains(&q)
             });
+            debug!(query = %self.search_query, matches = sessions.len(), "search filtered");
         }
 
         // Sort by started_at descending (most recent first)
         sessions.sort_by(|a, b| b.started_at.cmp(&a.started_at));
 
+        debug!(count = sessions.len(), "sessions updated");
         self.sessions = sessions;
         self.rebuild_sidebar();
     }
@@ -351,6 +353,7 @@ impl App {
             match key.code {
                 KeyCode::Char('y') => {
                     if let Some(idx) = self.confirm_kill.take() {
+                        info!(session_idx = idx, "kill confirmed");
                         if let Some(session) = self.sessions.get(idx) {
                             if let Err(e) = self.session_manager.kill(session) {
                                 warn!("kill failed: {e}");
@@ -408,7 +411,8 @@ impl App {
     }
 
     pub fn enter_passthrough(&mut self) {
-        if self.selected_session().is_some() {
+        if let Some(session) = self.selected_session() {
+            info!(pane_id = %session.tmux_pane, "entered passthrough");
             self.passthrough_mode = true;
             self.last_esc_time = None;
         }
@@ -422,6 +426,7 @@ impl App {
     fn cycle_grouping_mode(&mut self) {
         let has_custom = !self.custom_groups.is_empty();
         self.grouping_mode = self.grouping_mode.cycle(has_custom);
+        info!(mode = %self.grouping_mode.as_str(), "grouping mode changed");
         self.rebuild_sidebar();
         // Save to config (best-effort)
         let _ = config::save_grouping_mode(&self.grouping_mode);
@@ -472,6 +477,7 @@ impl App {
         }
 
         self.selected_index = new_idx;
+        trace!(selected = self.selected_index, "selection changed");
         self.update_preview_from_cache();
     }
 
