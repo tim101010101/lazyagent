@@ -187,6 +187,12 @@ fn main() -> anyhow::Result<()> {
                     }
                     app.handle_key(key);
 
+                    // Async refresh: send to bg worker instead of blocking
+                    if app.refresh_requested {
+                        app.refresh_requested = false;
+                        let _ = bg_tx.send(BgRequest::Refresh);
+                    }
+
                     // Send capture immediately on navigation (don't wait for next tick)
                     if let Some(pane_id) = app.pending_preview.take() {
                         let _ = bg_tx.send(BgRequest::Capture { pane_id });

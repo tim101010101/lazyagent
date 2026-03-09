@@ -7,7 +7,7 @@ use rayon::prelude::*;
 use tracing::{debug, trace, warn};
 
 use crate::protocol::{
-    AgentSession, AgentStatus, ExecPlan, Provider, SessionKind, SessionSource,
+    AgentSession, AgentStatus, ExecPlan, Provider, ResolveContext, SessionKind, SessionSource,
 };
 
 const SESSION_PREFIX: &str = "la/";
@@ -34,7 +34,7 @@ impl TmuxController {
                 "list-panes",
                 "-a",
                 "-F",
-                "#{session_name} #{pane_id} #{pane_pid} #{pane_current_command} #{pane_current_path} #{session_created}",
+                "#{session_name}\t#{pane_id}\t#{pane_pid}\t#{pane_current_command}\t#{pane_current_path}\t#{session_created}",
             ])
             .output()
         {
@@ -57,6 +57,8 @@ impl TmuxController {
         struct MatchedPane {
             session_name: String,
             pane_id: String,
+            pane_pid: u32,
+            matched_pid: Option<u32>,
             pane_path: String,
             session_created: String,
             provider_id: String,
@@ -66,7 +68,7 @@ impl TmuxController {
         let mut matched: Vec<MatchedPane> = Vec::new();
 
         for line in output.lines() {
-            let parts: Vec<&str> = line.splitn(6, ' ').collect();
+            let parts: Vec<&str> = line.splitn(6, '\t').collect();
             if parts.len() < 5 {
                 continue;
             }
@@ -80,10 +82,13 @@ impl TmuxController {
 
             // Check if pane command directly matches a provider
             let mut matched_provider: Option<String> = None;
+            let mut matched_pid: Option<u32> = None;
             for provider in providers {
                 trace!(pane_cmd, provider_id = %provider.manifest().id, "checking direct match");
                 if provider.match_process(pane_cmd) {
                     matched_provider = Some(provider.manifest().id);
+                    // Direct match: the pane process IS the agent
+                    matched_pid = pane_pid.parse().ok();
                     break;
                 }
             }
@@ -92,11 +97,12 @@ impl TmuxController {
             if matched_provider.is_none() {
                 let descendants = find_descendant_commands(pane_pid, &proc_tree);
                 trace!(pane_pid, descendant_count = descendants.len(), "checking descendants");
-                'outer: for child_cmd in &descendants {
+                'outer: for (child_pid, child_cmd) in &descendants {
                     for provider in providers {
                         trace!(child_cmd, provider_id = %provider.manifest().id, "checking descendant");
                         if provider.match_process(child_cmd) {
                             matched_provider = Some(provider.manifest().id);
+                            matched_pid = child_pid.parse().ok();
                             break 'outer;
                         }
                     }
@@ -117,6 +123,8 @@ impl TmuxController {
             matched.push(MatchedPane {
                 session_name: session_name.to_string(),
                 pane_id: pane_id.to_string(),
+                pane_pid: pane_pid.parse().unwrap_or(0),
+                matched_pid,
                 pane_path: pane_path.to_string(),
                 session_created: session_created.to_string(),
                 provider_id,
@@ -130,7 +138,14 @@ impl TmuxController {
         let sessions: Vec<AgentSession> = matched
             .par_iter()
             .map(|m| {
-                let status = capture_pane_status(&m.pane_id, providers, &m.provider_id);
+                let ctx = ResolveContext::new(
+                    m.pane_pid,
+                    m.pane_path.clone(),
+                    m.pane_id.clone(),
+                    m.session_created.parse().ok(),
+                    m.matched_pid,
+                );
+                let status = resolve_status(&ctx, providers, &m.provider_id);
                 let git_root = resolve_git_root(Path::new(&m.pane_path));
                 trace!(pane_id = %m.pane_id, git_root = ?git_root, "resolved git root");
 
@@ -307,15 +322,16 @@ fn build_process_tree() -> HashMap<String, Vec<(String, String)>> {
     tree
 }
 
-/// Walk the process tree in-memory (BFS) to find descendant command names.
-fn find_descendant_commands(pid: &str, tree: &HashMap<String, Vec<(String, String)>>) -> Vec<String> {
+/// Walk the process tree in-memory (BFS) to find descendant processes.
+/// Returns Vec<(pid, comm)> for each descendant.
+fn find_descendant_commands(pid: &str, tree: &HashMap<String, Vec<(String, String)>>) -> Vec<(String, String)> {
     let mut result = Vec::new();
     let mut queue = vec![pid.to_string()];
 
     while let Some(current) = queue.pop() {
         if let Some(children) = tree.get(&current) {
             for (child_pid, comm) in children {
-                result.push(comm.clone());
+                result.push((child_pid.clone(), comm.clone()));
                 queue.push(child_pid.clone());
             }
         }
@@ -341,30 +357,22 @@ fn resolve_git_root(cwd: &Path) -> Option<String> {
         })
 }
 
-fn capture_pane_status(
-    pane_id: &str,
+fn resolve_status(
+    ctx: &ResolveContext,
     providers: &[Box<dyn Provider>],
     provider_id: &str,
 ) -> AgentStatus {
-    let output = match Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", pane_id])
-        .output()
-    {
-        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
-        _ => {
-            debug!(pane_id, "capture-pane failed");
-            return AgentStatus::Unknown;
-        }
-    };
-
     for provider in providers {
         if provider.manifest().id == provider_id {
-            let status = provider.detect_status(&output);
-            debug!(pane_id, provider_id, ?status, "detected status");
-            return status;
+            for resolver in provider.resolvers() {
+                if let Some(status) = resolver.resolve(ctx) {
+                    debug!(pane_id = %ctx.pane_id, provider_id, ?status, "resolved status");
+                    return status;
+                }
+            }
+            break;
         }
     }
-
     AgentStatus::Unknown
 }
 
@@ -391,6 +399,19 @@ mod tests {
     fn test_shell_escape_special_chars() {
         assert_eq!(shell_escape("hello world"), "'hello world'");
         assert_eq!(shell_escape("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn test_parse_tab_separated_line_with_spaces_in_path() {
+        let line = "mysession\t%0\t1234\tbash\t/home/user/my project dir\t1700000000";
+        let parts: Vec<&str> = line.splitn(6, '\t').collect();
+        assert_eq!(parts.len(), 6);
+        assert_eq!(parts[0], "mysession");
+        assert_eq!(parts[1], "%0");
+        assert_eq!(parts[2], "1234");
+        assert_eq!(parts[3], "bash");
+        assert_eq!(parts[4], "/home/user/my project dir");
+        assert_eq!(parts[5], "1700000000");
     }
 
     #[test]

@@ -69,6 +69,7 @@ impl Default for KeysConfig {
     }
 }
 
+// TODO: support modifier keys (Ctrl, Alt, Shift) in keybinding config strings (e.g. "C-k", "A-j")
 /// Precomputed KeyCode bindings from string config.
 #[derive(Debug, Clone)]
 pub struct KeyBindings {

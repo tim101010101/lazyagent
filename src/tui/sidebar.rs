@@ -122,6 +122,7 @@ fn status_icon(
 ) -> (&'static str, ratatui::style::Style) {
     match status {
         AgentStatus::Waiting | AgentStatus::Idle => ("●", theme.status_active),
+        AgentStatus::NeedsInput => ("◆", theme.status_needs_input),
         AgentStatus::Thinking => {
             let frame = (tick as usize) % SPINNER_FRAMES.len();
             (SPINNER_FRAMES[frame], theme.status_thinking)
@@ -174,7 +175,7 @@ mod tests {
 
     #[test]
     fn test_shorten_path() {
-        assert_eq!(shorten_path("/Users/didi/Code/app"), "~/Code/app");
+        assert_eq!(shorten_path("/home/user/Code/app"), "~/Code/app");
         assert_eq!(shorten_path("/app"), "/app");
         assert_eq!(shorten_path("~/short"), "~/short");
     }

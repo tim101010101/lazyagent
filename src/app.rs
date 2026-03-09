@@ -63,7 +63,7 @@ pub struct App {
     pub sidebar_items: Vec<SidebarItem>,
     pub selected_index: usize,
     pub error_message: Option<String>,
-    pub confirm_kill: Option<usize>,
+    pub confirm_kill: Option<String>,
     pub pane_preview: Option<String>,
     pub preview_cache: HashMap<String, String>,
     pub pending_preview: Option<String>,
@@ -77,6 +77,9 @@ pub struct App {
     pub layout_config: LayoutConfig,
     pub sidebar_config: SidebarConfig,
     pub timing: TimingConfig,
+    pub refresh_requested: bool,
+    pub selected_pane: Option<String>,
+    all_sessions: Vec<AgentSession>,
     session_manager: SessionManager,
 }
 
@@ -106,6 +109,9 @@ impl App {
             layout_config: LayoutConfig::default(),
             sidebar_config: SidebarConfig::default(),
             timing: TimingConfig::default(),
+            refresh_requested: false,
+            selected_pane: None,
+            all_sessions: Vec::new(),
             session_manager,
         }
     }
@@ -127,7 +133,15 @@ impl App {
     }
 
     /// Update sessions list from externally-provided data. No subprocess calls.
-    pub fn update_sessions(&mut self, mut sessions: Vec<AgentSession>) {
+    pub fn update_sessions(&mut self, sessions: Vec<AgentSession>) {
+        self.all_sessions = sessions;
+        self.apply_filter();
+    }
+
+    /// Re-filter and sort from all_sessions, rebuild sidebar, preserve selection.
+    pub fn apply_filter(&mut self) {
+        let mut sessions = self.all_sessions.clone();
+
         // Filter by search query
         if !self.search_query.is_empty() {
             let q = self.search_query.to_lowercase();
@@ -144,6 +158,7 @@ impl App {
         debug!(count = sessions.len(), "sessions updated");
         self.sessions = sessions;
         self.rebuild_sidebar();
+        self.restore_selection();
     }
 
     /// Rebuild sidebar items from current sessions without re-polling.
@@ -264,6 +279,37 @@ impl App {
         }
     }
 
+    /// Restore selected_index from selected_pane after sidebar rebuild.
+    fn restore_selection(&mut self) {
+        if let Some(ref pane_id) = self.selected_pane {
+            for (i, item) in self.sidebar_items.iter().enumerate() {
+                if let SidebarItem::Session(idx) = item {
+                    if let Some(s) = self.sessions.get(*idx) {
+                        if s.tmux_pane == *pane_id {
+                            self.selected_index = i;
+                            self.update_preview_from_cache();
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        // Fallback: clamp to valid range
+        if !self.sidebar_items.is_empty() {
+            self.selected_index = self.selected_index.min(self.sidebar_items.len() - 1);
+        } else {
+            self.selected_index = 0;
+        }
+        self.skip_to_nearest_session();
+        // Update selected_pane to match new selection
+        if let Some(session) = self.selected_session() {
+            self.selected_pane = Some(session.tmux_pane.clone());
+        } else {
+            self.selected_pane = None;
+        }
+        self.update_preview_from_cache();
+    }
+
     /// Apply a background update (sessions or preview).
     pub fn apply_bg_update(&mut self, update: BgUpdate) {
         match update {
@@ -371,14 +417,14 @@ impl App {
         if self.confirm_kill.is_some() {
             match key.code {
                 KeyCode::Char('y') => {
-                    if let Some(idx) = self.confirm_kill.take() {
-                        info!(session_idx = idx, "kill confirmed");
-                        if let Some(session) = self.sessions.get(idx) {
+                    if let Some(pane_id) = self.confirm_kill.take() {
+                        info!(pane_id = %pane_id, "kill confirmed");
+                        if let Some(session) = self.sessions.iter().find(|s| s.tmux_pane == pane_id) {
                             if let Err(e) = self.session_manager.kill(session) {
                                 warn!("kill failed: {e}");
                                 self.error_message = Some(format!("kill failed: {e}"));
                             }
-                            self.refresh_sessions();
+                            self.refresh_requested = true;
                         }
                     }
                 }
@@ -412,14 +458,14 @@ impl App {
         } else if code == keys.detail_hide {
             self.show_detail = false;
         } else if code == keys.kill {
-            if let Some(idx) = self.selected_session_index() {
-                self.confirm_kill = Some(idx);
+            if let Some(session) = self.selected_session() {
+                self.confirm_kill = Some(session.tmux_pane.clone());
             }
         } else if code == keys.search {
             self.search_mode = true;
             self.search_query.clear();
         } else if code == keys.refresh {
-            self.refresh_sessions();
+            self.refresh_requested = true;
         } else if code == keys.cycle_group {
             self.cycle_grouping_mode();
         } else if code == keys.passthrough {
@@ -456,19 +502,19 @@ impl App {
             KeyCode::Esc => {
                 self.search_mode = false;
                 self.search_query.clear();
-                self.refresh_sessions();
+                self.apply_filter();
             }
             KeyCode::Enter => {
                 self.search_mode = false;
-                self.refresh_sessions();
+                self.apply_filter();
             }
             KeyCode::Backspace => {
                 self.search_query.pop();
-                self.refresh_sessions();
+                self.apply_filter();
             }
             KeyCode::Char(c) => {
                 self.search_query.push(c);
-                self.refresh_sessions();
+                self.apply_filter();
             }
             _ => {}
         }
@@ -496,6 +542,9 @@ impl App {
         }
 
         self.selected_index = new_idx;
+        if let Some(session) = self.selected_session() {
+            self.selected_pane = Some(session.tmux_pane.clone());
+        }
         trace!(selected = self.selected_index, "selection changed");
         self.update_preview_from_cache();
     }
@@ -503,6 +552,9 @@ impl App {
     fn move_to_top(&mut self) {
         self.selected_index = 0;
         self.skip_to_nearest_session();
+        if let Some(session) = self.selected_session() {
+            self.selected_pane = Some(session.tmux_pane.clone());
+        }
         self.update_preview_from_cache();
     }
 
@@ -519,6 +571,9 @@ impl App {
                         break;
                     }
                 }
+            }
+            if let Some(session) = self.selected_session() {
+                self.selected_pane = Some(session.tmux_pane.clone());
             }
             self.update_preview_from_cache();
         }
