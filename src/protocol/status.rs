@@ -71,11 +71,80 @@ pub fn find_open_jsonl(pid: u32) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+    use std::process::{Command as StdCommand, Stdio};
 
     #[test]
     fn test_find_open_jsonl_nonexistent_pid() {
-        // PID 1 (launchd) won't have .jsonl files open; lsof may fail or return nothing
         let result = find_open_jsonl(999_999_999);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_find_open_jsonl_with_real_fd() {
+        // Create a temp .jsonl file
+        let dir = std::env::temp_dir();
+        let jsonl_path = dir.join("test_lsof_integration.jsonl");
+        std::fs::write(&jsonl_path, r#"{"type":"test"}"#).unwrap();
+
+        // Spawn a child process that holds the file open via `tail -f`
+        let child = StdCommand::new("tail")
+            .args(["-f", jsonl_path.to_str().unwrap()])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+
+        let mut child = match child {
+            Ok(c) => c,
+            Err(_) => {
+                std::fs::remove_file(&jsonl_path).ok();
+                return; // skip if tail not available
+            }
+        };
+
+        let pid = child.id();
+
+        // Small delay for fd to be visible to lsof
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        let result = find_open_jsonl(pid);
+
+        // Canonicalize before cleanup (file must exist)
+        let expected = jsonl_path.canonicalize().unwrap();
+
+        // Cleanup
+        child.kill().ok();
+        child.wait().ok();
+        std::fs::remove_file(&jsonl_path).ok();
+
+        assert_eq!(
+            result.map(|p| std::fs::canonicalize(&p).unwrap_or(p)),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn test_find_open_jsonl_no_jsonl_fd() {
+        // Spawn a process that does NOT hold any .jsonl file
+        let child = StdCommand::new("sleep")
+            .arg("10")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+
+        let mut child = match child {
+            Ok(c) => c,
+            Err(_) => return,
+        };
+
+        let pid = child.id();
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let result = find_open_jsonl(pid);
+
+        child.kill().ok();
+        child.wait().ok();
+
         assert!(result.is_none());
     }
 }

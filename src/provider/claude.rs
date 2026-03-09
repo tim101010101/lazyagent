@@ -432,4 +432,40 @@ mod tests {
 
         std::fs::remove_file(jsonl_path).ok();
     }
+
+    #[test]
+    fn test_resolver_cache_hit() {
+        use std::io::Write;
+        let dir = std::env::temp_dir();
+        let jsonl_path = dir.join("test_claude_cache_hit.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","message":{{"stop_reason":"end_turn"}}}}"#
+        )
+        .unwrap();
+        drop(file);
+
+        let resolver = ClaudeJsonlResolver::new();
+        // Inject into cache
+        resolver.cache.lock().unwrap().insert(42, jsonl_path.clone());
+
+        let ctx = ResolveContext::new(1, "/tmp".into(), "%0".into(), None, Some(42));
+        let status = resolver.resolve(&ctx);
+        assert_eq!(status, Some(AgentStatus::Waiting));
+
+        // Update file — cache still points to same path, picks up new content
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(
+            file,
+            r#"{{"type":"assistant","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","name":"AskUserQuestion","id":"1"}}]}}}}"#
+        )
+        .unwrap();
+        drop(file);
+
+        let status = resolver.resolve(&ctx);
+        assert_eq!(status, Some(AgentStatus::NeedsInput));
+
+        std::fs::remove_file(jsonl_path).ok();
+    }
 }

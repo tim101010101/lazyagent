@@ -183,4 +183,27 @@ mod tests {
         let pid = ctx.matched_pid.unwrap_or(ctx.pane_pid);
         assert_eq!(pid, 1234);
     }
+
+    #[test]
+    fn test_resolver_cache_hit() {
+        // Pre-populate cache with a known path, verify resolver reads from it
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_codex_cache_hit.jsonl");
+        std::fs::write(&path, r#"{"type":"task_complete","data":{}}"#).unwrap();
+
+        let resolver = CodexJsonlResolver::new();
+        // Inject into cache — simulates a previous lsof discovery
+        resolver.cache.lock().unwrap().insert(42, path.clone());
+
+        let ctx = ResolveContext::new(1, "/tmp".into(), "%0".into(), None, Some(42));
+        let status = resolver.resolve(&ctx);
+        assert_eq!(status, Some(AgentStatus::Waiting));
+
+        // Update file content, cache still points to same path
+        std::fs::write(&path, r#"{"type":"task_started","data":{}}"#).unwrap();
+        let status = resolver.resolve(&ctx);
+        assert_eq!(status, Some(AgentStatus::Thinking));
+
+        std::fs::remove_file(&path).ok();
+    }
 }
