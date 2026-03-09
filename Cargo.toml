@@ -3,6 +3,12 @@ name = "lazyagent"
 version = "0.2.0"
 edition = "2021"
 description = "A lazygit-style TUI for managing AI coding agent sessions"
+license = "MIT"
+repository = "https://github.com/tim101010101/lazyagent"
+homepage = "https://github.com/tim101010101/lazyagent"
+authors = ["Ethan Teng <ethanteng1212@qq.com>"]
+keywords = ["tui", "tmux", "ai", "agent", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ratatui = "0.29"
@@ -19,3 +25,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-appender = "0.2"
 uuid = { version = "1", features = ["v4"] }
+
+[profile.dist]
+inherits = "release"
+lto = "thin"
