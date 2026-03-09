@@ -192,6 +192,31 @@ impl TmuxController {
         Some(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
+    /// Send named keys to a tmux pane (e.g. "Enter", "BSpace", "C-c").
+    pub fn send_keys(pane_id: &str, keys: &[&str]) -> anyhow::Result<()> {
+        let mut args = vec!["send-keys", "-t", pane_id];
+        args.extend(keys);
+
+        let output = Command::new("tmux").args(&args).output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("tmux send-keys failed: {stderr}");
+        }
+        Ok(())
+    }
+
+    /// Send literal text to a tmux pane (characters sent as-is).
+    pub fn send_text(pane_id: &str, text: &str) -> anyhow::Result<()> {
+        let output = Command::new("tmux")
+            .args(["send-keys", "-t", pane_id, "-l", text])
+            .output()?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("tmux send-keys -l failed: {stderr}");
+        }
+        Ok(())
+    }
+
     pub fn kill_session(session_name: &str) -> anyhow::Result<()> {
         let output = Command::new("tmux")
             .args(["kill-session", "-t", session_name])

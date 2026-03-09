@@ -1,12 +1,10 @@
-use super::{
-    ExecPlan, HealthStatus, ListQuery, ListResponse, ProviderError, ProviderManifest,
-    SessionDetail,
-};
+use std::path::Path;
+
+use super::{AgentStatus, ExecPlan, ProviderManifest};
 
 pub trait Provider: Send + Sync {
     fn manifest(&self) -> ProviderManifest;
-    fn health(&self) -> HealthStatus;
-    fn list_sessions(&self, query: &ListQuery) -> Result<ListResponse, ProviderError>;
-    fn session_detail(&self, native_id: &str) -> Result<SessionDetail, ProviderError>;
-    fn resume_command(&self, native_id: &str) -> Result<ExecPlan, ProviderError>;
+    fn detect_status(&self, pane_output: &str) -> AgentStatus;
+    fn match_process(&self, process_name: &str) -> bool;
+    fn exec_plan(&self, cwd: &Path) -> ExecPlan;
 }

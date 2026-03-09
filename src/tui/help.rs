@@ -13,8 +13,11 @@ pub fn render(
     search_mode: bool,
     search_query: &str,
     confirm_mode: bool,
+    passthrough_mode: bool,
 ) {
-    let hints = if confirm_mode {
+    let hints = if passthrough_mode {
+        vec![("Esc+Esc", "exit passthrough")]
+    } else if confirm_mode {
         vec![("y", "confirm"), ("n", "cancel")]
     } else if search_mode {
         vec![("Enter", "apply"), ("Esc", "cancel")]
@@ -22,6 +25,7 @@ pub fn render(
         vec![
             ("j/k", "nav"),
             ("Enter", "attach"),
+            ("i", "passthrough"),
             ("n", "new"),
             ("d", "kill"),
             ("/", "search"),
@@ -37,6 +41,10 @@ pub fn render(
         spans.push(Span::styled(" /", Theme::title()));
         spans.push(Span::styled(search_query, Theme::value()));
         spans.push(Span::styled("  ", Theme::key_hint()));
+    }
+
+    if passthrough_mode {
+        spans.push(Span::styled(" PASSTHROUGH ", Theme::passthrough_indicator()));
     }
 
     if confirm_mode {

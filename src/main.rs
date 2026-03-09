@@ -9,9 +9,10 @@ mod tmux;
 mod tui;
 
 use std::io::IsTerminal;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ansi_to_tui::IntoText;
+use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{
     layout::Rect,
     text::{Line, Span, Text},
@@ -28,6 +29,8 @@ use tui::theme::Theme;
 
 const REFRESH_INTERVAL_TICKS: u32 = 20; // 20 * 100ms = 2s
 const PREVIEW_INTERVAL_TICKS: u32 = 2; // 2 * 100ms = 200ms
+const PASSTHROUGH_PREVIEW_TICKS: u32 = 1; // 1 * 100ms = 100ms
+const DOUBLE_ESC_TIMEOUT: Duration = Duration::from_millis(300);
 
 fn main() -> anyhow::Result<()> {
     if !std::io::stdout().is_terminal() {
@@ -103,6 +106,7 @@ fn main() -> anyhow::Result<()> {
                 app.search_mode,
                 &app.search_query,
                 app.confirm_kill.is_some(),
+                app.passthrough_mode,
             );
         })?;
 
@@ -110,7 +114,22 @@ fn main() -> anyhow::Result<()> {
         if let Some(ev) = event::poll_event(Duration::from_millis(100))? {
             match ev {
                 event::AppEvent::Key(key) => {
-                    if key.code == crossterm::event::KeyCode::Enter
+                    // Passthrough mode: forward keys to tmux pane
+                    if app.passthrough_mode {
+                        if let Some(session) = app.selected_session() {
+                            let pane_id = session.tmux_pane.clone();
+                            handle_passthrough_key(&mut app, key, &pane_id);
+                        } else {
+                            app.exit_passthrough();
+                        }
+
+                        if let Some(pane_id) = app.pending_preview.take() {
+                            let _ = bg_tx.send(BgRequest::Capture { pane_id });
+                        }
+                        continue;
+                    }
+
+                    if key.code == KeyCode::Enter
                         && !app.search_mode
                         && app.confirm_kill.is_none()
                     {
@@ -123,7 +142,7 @@ fn main() -> anyhow::Result<()> {
                             let _ = bg_tx.send(BgRequest::Refresh);
                             continue;
                         }
-                    } else if key.code == crossterm::event::KeyCode::Char('n')
+                    } else if key.code == KeyCode::Char('n')
                         && !app.search_mode
                         && app.confirm_kill.is_none()
                     {
@@ -160,9 +179,16 @@ fn main() -> anyhow::Result<()> {
                         tick_counter = 0;
                         let _ = bg_tx.send(BgRequest::Refresh);
                         preview_counter = 0;
-                    } else if preview_counter >= PREVIEW_INTERVAL_TICKS {
-                        preview_counter = 0;
-                        app.refresh_preview();
+                    } else {
+                        let preview_interval = if app.passthrough_mode {
+                            PASSTHROUGH_PREVIEW_TICKS
+                        } else {
+                            PREVIEW_INTERVAL_TICKS
+                        };
+                        if preview_counter >= preview_interval {
+                            preview_counter = 0;
+                            app.refresh_preview();
+                        }
                     }
                 }
             }
@@ -177,17 +203,113 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Handle a key event in passthrough mode: double-Esc exits, everything else forwarded.
+fn handle_passthrough_key(app: &mut App, key: crossterm::event::KeyEvent, pane_id: &str) {
+    if key.code == KeyCode::Esc {
+        if let Some(first_esc) = app.last_esc_time {
+            if first_esc.elapsed() < DOUBLE_ESC_TIMEOUT {
+                // Double-Esc: exit passthrough (don't send second Esc)
+                app.exit_passthrough();
+                return;
+            }
+        }
+        // First Esc (or timeout expired): record time, send pending Esc if any
+        if app.last_esc_time.is_some() {
+            // Previous Esc timed out — send it now
+            let _ = TmuxController::send_keys(pane_id, &["Escape"]);
+        }
+        app.last_esc_time = Some(Instant::now());
+        return;
+    }
+
+    // Non-Esc key: flush pending Esc if any, then send this key
+    if app.last_esc_time.take().is_some() {
+        let _ = TmuxController::send_keys(pane_id, &["Escape"]);
+    }
+
+    send_key_to_tmux(key, pane_id);
+    // Trigger immediate preview refresh
+    app.refresh_preview();
+}
+
+/// Map a crossterm KeyEvent to tmux send-keys and dispatch.
+fn send_key_to_tmux(key: crossterm::event::KeyEvent, pane_id: &str) {
+    let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+
+    match key.code {
+        KeyCode::Char(c) if has_ctrl => {
+            let tmux_key = format!("C-{c}");
+            let _ = TmuxController::send_keys(pane_id, &[&tmux_key]);
+        }
+        KeyCode::Char(c) => {
+            let _ = TmuxController::send_text(pane_id, &c.to_string());
+        }
+        KeyCode::Enter => {
+            let _ = TmuxController::send_keys(pane_id, &["Enter"]);
+        }
+        KeyCode::Backspace => {
+            let _ = TmuxController::send_keys(pane_id, &["BSpace"]);
+        }
+        KeyCode::Tab => {
+            let _ = TmuxController::send_keys(pane_id, &["Tab"]);
+        }
+        KeyCode::Esc => {
+            let _ = TmuxController::send_keys(pane_id, &["Escape"]);
+        }
+        KeyCode::Up => {
+            let _ = TmuxController::send_keys(pane_id, &["Up"]);
+        }
+        KeyCode::Down => {
+            let _ = TmuxController::send_keys(pane_id, &["Down"]);
+        }
+        KeyCode::Left => {
+            let _ = TmuxController::send_keys(pane_id, &["Left"]);
+        }
+        KeyCode::Right => {
+            let _ = TmuxController::send_keys(pane_id, &["Right"]);
+        }
+        KeyCode::Home => {
+            let _ = TmuxController::send_keys(pane_id, &["Home"]);
+        }
+        KeyCode::End => {
+            let _ = TmuxController::send_keys(pane_id, &["End"]);
+        }
+        KeyCode::PageUp => {
+            let _ = TmuxController::send_keys(pane_id, &["PageUp"]);
+        }
+        KeyCode::PageDown => {
+            let _ = TmuxController::send_keys(pane_id, &["PageDown"]);
+        }
+        KeyCode::Delete => {
+            let _ = TmuxController::send_keys(pane_id, &["DC"]);
+        }
+        _ => {} // Unsupported keys silently ignored
+    }
+}
+
 fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let title = app
+    let base_title = app
         .selected_session()
         .map(|s| format!(" {} — {} ", s.provider, s.cwd.display()))
         .unwrap_or_else(|| " LazyAgent ".into());
+
+    let title = if app.passthrough_mode {
+        format!(" PASSTHROUGH | {}", base_title.trim())
+    } else {
+        base_title
+    };
+
+    let border_style = if app.passthrough_mode {
+        Theme::passthrough_border()
+    } else {
+        Theme::border_unfocused()
+    };
 
     let block = Block::default()
         .title(title)
         .title_style(Theme::title())
         .borders(Borders::ALL)
-        .border_style(Theme::border_unfocused());
+        .border_style(border_style);
 
     if let Some(ref preview) = app.pane_preview {
         // Parse ANSI escape codes into styled ratatui Text

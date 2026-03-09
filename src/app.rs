@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
@@ -67,6 +68,8 @@ pub struct App {
     pub pending_preview: Option<String>,
     pub grouping_mode: GroupingMode,
     pub custom_groups: Vec<CustomGroup>,
+    pub passthrough_mode: bool,
+    pub last_esc_time: Option<Instant>,
     git_root_cache: HashMap<PathBuf, Option<String>>,
     session_manager: SessionManager,
 }
@@ -88,6 +91,8 @@ impl App {
             pending_preview: None,
             grouping_mode: GroupingMode::Flat,
             custom_groups: Vec::new(),
+            passthrough_mode: false,
+            last_esc_time: None,
             git_root_cache: HashMap::new(),
             session_manager,
         }
@@ -392,10 +397,23 @@ impl App {
             }
             KeyCode::Char('r') => self.refresh_sessions(),
             KeyCode::Tab => self.cycle_grouping_mode(),
+            KeyCode::Char('i') => self.enter_passthrough(),
             // Enter and 'n' handled in main.rs
             KeyCode::Enter | KeyCode::Char('n') => {}
             _ => {}
         }
+    }
+
+    pub fn enter_passthrough(&mut self) {
+        if self.selected_session().is_some() {
+            self.passthrough_mode = true;
+            self.last_esc_time = None;
+        }
+    }
+
+    pub fn exit_passthrough(&mut self) {
+        self.passthrough_mode = false;
+        self.last_esc_time = None;
     }
 
     fn cycle_grouping_mode(&mut self) {
