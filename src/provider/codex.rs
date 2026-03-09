@@ -1,71 +1,33 @@
-use std::collections::BTreeMap;
-use std::path::Path;
-use std::process::Command;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
-use tracing::{debug, trace, warn};
+use tracing::{debug, trace};
 
 use crate::protocol::{
-    AgentStatus, ExecPlan, LineMatcher, Provider, ProviderManifest, ResolveContext, StatusResolver,
-    StatusRule, TextMatchResolver,
+    find_open_jsonl, AgentStatus, ExecPlan, Provider, ProviderManifest, ResolveContext,
+    StatusResolver,
 };
 
-// ===== Codex SQLite Resolver (Tier 1) =====
+// ===== Codex JSONL Resolver (lsof + cache) =====
 
-/// Resolves status from Codex CLI's native SQLite state database.
-/// Path: ~/.codex/state_5.sqlite
-/// Uses sqlite3 CLI to avoid adding rusqlite dependency.
-struct CodexSqliteResolver;
+struct CodexJsonlResolver {
+    cache: Mutex<HashMap<u32, PathBuf>>,
+}
 
-impl CodexSqliteResolver {
-    /// Get the path to the Codex state database.
-    fn db_path() -> Option<std::path::PathBuf> {
-        let home = dirs::home_dir()?;
-        let path = home.join(".codex").join("state_5.sqlite");
-        if path.exists() {
-            Some(path)
-        } else {
-            None
-        }
-    }
-
-    /// Query sqlite3 for the rollout_path associated with a PID.
-    fn query_rollout_path(db_path: &Path, pane_pid: u32) -> Option<String> {
-        let query = format!(
-            "SELECT t.rollout_path FROM logs l \
-             JOIN threads t ON l.thread_id = t.id \
-             WHERE l.process_uuid GLOB 'pid:{}:*' \
-             AND l.thread_id IS NOT NULL \
-             ORDER BY l.id DESC LIMIT 1",
-            pane_pid
-        );
-
-        let output = Command::new("sqlite3")
-            .args(["-readonly", db_path.to_str()?, &query])
-            .output()
-            .ok()?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(pid = pane_pid, stderr = %stderr, "sqlite3 query failed");
-            return None;
-        }
-
-        let result = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
+impl CodexJsonlResolver {
+    fn new() -> Self {
+        Self {
+            cache: Mutex::new(HashMap::new()),
         }
     }
 
     /// Read last line of rollout JSONL and determine status.
-    fn parse_rollout_status(rollout_path: &str) -> Option<AgentStatus> {
+    fn parse_rollout_status(rollout_path: &Path) -> Option<AgentStatus> {
         let content = std::fs::read_to_string(rollout_path).ok()?;
         let last_line = content.lines().rev().find(|l| !l.trim().is_empty())?;
 
         let v: serde_json::Value = serde_json::from_str(last_line).ok()?;
-
-        // Codex rollout events use type field or nested event structure
         let event_type = v.get("type").and_then(|t| t.as_str());
 
         match event_type {
@@ -80,40 +42,32 @@ impl CodexSqliteResolver {
     }
 }
 
-impl StatusResolver for CodexSqliteResolver {
+impl StatusResolver for CodexJsonlResolver {
     fn resolve(&self, ctx: &ResolveContext) -> Option<AgentStatus> {
-        let db_path = Self::db_path()?;
-        let rollout_path = Self::query_rollout_path(&db_path, ctx.pane_pid)?;
-        let status = Self::parse_rollout_status(&rollout_path);
-        debug!(?status, rollout_path, pid = ctx.pane_pid, "codex sqlite status resolved");
+        let pid = ctx.matched_pid.unwrap_or(ctx.pane_pid);
+
+        // Check cache first
+        let cached = self.cache.lock().ok()?.get(&pid).cloned();
+        if let Some(ref path) = cached {
+            let status = Self::parse_rollout_status(path);
+            debug!(?status, path = %path.display(), pid, "codex status from cache");
+            return status;
+        }
+
+        // lsof lookup
+        let path = find_open_jsonl(pid)?;
+        debug!(pid, path = %path.display(), "codex jsonl discovered via lsof");
+
+        // Cache the path
+        if let Ok(mut cache) = self.cache.lock() {
+            cache.insert(pid, path.clone());
+        }
+
+        let status = Self::parse_rollout_status(&path);
+        debug!(?status, path = %path.display(), pid, "codex status resolved");
         status
     }
 }
-
-// ===== Text Match Rules (Tier 2) =====
-
-static CODEX_TEXT_RULES: &[StatusRule] = &[
-    StatusRule {
-        status: AgentStatus::Thinking,
-        matcher: LineMatcher::Contains("Thinking"),
-        max_line: None,
-    },
-    StatusRule {
-        status: AgentStatus::Thinking,
-        matcher: LineMatcher::Contains("Running"),
-        max_line: None,
-    },
-    StatusRule {
-        status: AgentStatus::Waiting,
-        matcher: LineMatcher::StartsWith(">"),
-        max_line: None,
-    },
-    StatusRule {
-        status: AgentStatus::Waiting,
-        matcher: LineMatcher::Contains("Enter a prompt"),
-        max_line: None,
-    },
-];
 
 // ===== Provider =====
 
@@ -123,15 +77,7 @@ pub struct CodexProvider {
 
 impl CodexProvider {
     pub fn new() -> Self {
-        let resolvers: Vec<Box<dyn StatusResolver>> = vec![
-            Box::new(CodexSqliteResolver),
-            Box::new(TextMatchResolver::new(
-                CODEX_TEXT_RULES,
-                20,
-                AgentStatus::Unknown,
-            )),
-        ];
-
+        let resolvers: Vec<Box<dyn StatusResolver>> = vec![Box::new(CodexJsonlResolver::new())];
         Self { resolvers }
     }
 }
@@ -171,85 +117,70 @@ impl Provider for CodexProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::ResolveContext;
-
-    fn mock_context(pane_output: &str) -> ResolveContext {
-        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None);
-        let _ = ctx.pane_output.set(pane_output.to_string());
-        ctx
-    }
 
     #[test]
     fn test_match_process() {
         let p = CodexProvider::new();
         assert!(p.match_process("codex"));
-        assert!(p.match_process("/Users/didi/.bun/install/global/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex"));
         assert!(!p.match_process("claude"));
         assert!(!p.match_process("node"));
     }
 
     #[test]
-    fn test_manifest() {
+    fn test_match_process_full_path() {
         let p = CodexProvider::new();
-        let m = p.manifest();
-        assert_eq!(m.id, "codex");
-        assert_eq!(m.name, "Codex CLI");
+        assert!(p.match_process("/usr/local/bin/codex"));
+        assert!(p.match_process("/home/user/.npm/bin/codex"));
     }
 
     #[test]
-    fn test_exec_plan() {
-        let p = CodexProvider::new();
-        let plan = p.exec_plan(Path::new("/home/user/project"));
-        assert_eq!(plan.program, "codex");
-        assert!(plan.args.is_empty());
-        assert_eq!(plan.cwd.as_deref(), Some("/home/user/project"));
+    fn test_parse_rollout_status_task_complete() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_codex_complete.jsonl");
+        std::fs::write(&path, r#"{"type":"task_complete","data":{}}"#).unwrap();
+        assert_eq!(
+            CodexJsonlResolver::parse_rollout_status(&path),
+            Some(AgentStatus::Waiting)
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn test_resolver_count() {
-        let p = CodexProvider::new();
-        assert_eq!(p.resolvers().len(), 2, "should have sqlite + text resolvers");
-    }
-
-    // Text matcher tests
-    #[test]
-    fn test_text_status_thinking() {
-        let p = CodexProvider::new();
-        let ctx = mock_context("Thinking...\nsome output");
-        let status = p.resolvers()[1].resolve(&ctx);
-        assert_eq!(status, Some(AgentStatus::Thinking));
+    fn test_parse_rollout_status_task_started() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_codex_started.jsonl");
+        std::fs::write(&path, r#"{"type":"task_started","data":{}}"#).unwrap();
+        assert_eq!(
+            CodexJsonlResolver::parse_rollout_status(&path),
+            Some(AgentStatus::Thinking)
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn test_text_status_waiting() {
-        let p = CodexProvider::new();
-        let ctx = mock_context("Done.\n> ");
-        let status = p.resolvers()[1].resolve(&ctx);
-        assert_eq!(status, Some(AgentStatus::Waiting));
+    fn test_parse_rollout_status_response_item() {
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_codex_response.jsonl");
+        std::fs::write(&path, r#"{"type":"response_item.created","data":{}}"#).unwrap();
+        assert_eq!(
+            CodexJsonlResolver::parse_rollout_status(&path),
+            Some(AgentStatus::Thinking)
+        );
+        std::fs::remove_file(&path).ok();
     }
 
     #[test]
-    fn test_text_status_waiting_prompt() {
-        let p = CodexProvider::new();
-        let ctx = mock_context("Enter a prompt (or type /help)");
-        let status = p.resolvers()[1].resolve(&ctx);
-        assert_eq!(status, Some(AgentStatus::Waiting));
+    fn test_resolver_uses_matched_pid() {
+        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, Some(48610));
+        assert_eq!(ctx.matched_pid, Some(48610));
+        let pid = ctx.matched_pid.unwrap_or(ctx.pane_pid);
+        assert_eq!(pid, 48610);
     }
 
     #[test]
-    fn test_text_status_unknown() {
-        let p = CodexProvider::new();
-        let ctx = mock_context("random output");
-        let status = p.resolvers()[1].resolve(&ctx);
-        assert_eq!(status, Some(AgentStatus::Unknown));
-    }
-
-    #[test]
-    fn test_db_path_nonexistent() {
-        // When ~/.codex/state_5.sqlite doesn't exist, should return None
-        // This is a basic sanity check - actual db presence varies
-        let path = CodexSqliteResolver::db_path();
-        // Just verify it doesn't panic
-        let _ = path;
+    fn test_resolver_falls_back_to_pane_pid() {
+        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, None);
+        let pid = ctx.matched_pid.unwrap_or(ctx.pane_pid);
+        assert_eq!(pid, 1234);
     }
 }

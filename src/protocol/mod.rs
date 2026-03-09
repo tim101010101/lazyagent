@@ -2,7 +2,7 @@ mod provider;
 pub mod status;
 
 pub use provider::Provider;
-pub use status::{LineMatcher, ResolveContext, StatusResolver, StatusRule, TextMatchResolver};
+pub use status::{find_open_jsonl, ResolveContext, StatusResolver};
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -18,6 +18,7 @@ pub enum SessionKind {
 pub enum AgentStatus {
     Thinking,
     Waiting,
+    NeedsInput,
     Idle,
     Error,
     Unknown,

@@ -7,31 +7,22 @@ use ratatui::{backend::TestBackend, Terminal};
 use crate::app::{App, GroupingMode, SidebarItem};
 use crate::config::CustomGroup;
 use crate::protocol::{
-    AgentSession, AgentStatus, ExecPlan, LineMatcher, Provider, ProviderManifest, SessionKind,
-    SessionSource, StatusResolver, StatusRule, TextMatchResolver,
+    AgentSession, AgentStatus, ExecPlan, Provider, ProviderManifest, ResolveContext, SessionKind,
+    SessionSource, StatusResolver,
 };
 use crate::session::SessionManager;
 use crate::tui::layout::AppLayout;
 
 // ===== Mock Provider =====
 
-static MOCK_TEXT_RULES: &[StatusRule] = &[
-    StatusRule {
-        status: AgentStatus::Error,
-        matcher: LineMatcher::Contains("Error"),
-        max_line: None,
-    },
-    StatusRule {
-        status: AgentStatus::Thinking,
-        matcher: LineMatcher::Contains("thinking"),
-        max_line: None,
-    },
-    StatusRule {
-        status: AgentStatus::Waiting,
-        matcher: LineMatcher::Contains(">"),
-        max_line: None,
-    },
-];
+/// Simple mock resolver that always returns Unknown (status is set directly on sessions in tests).
+struct MockResolver;
+
+impl StatusResolver for MockResolver {
+    fn resolve(&self, _ctx: &ResolveContext) -> Option<AgentStatus> {
+        Some(AgentStatus::Unknown)
+    }
+}
 
 struct MockProvider {
     resolvers: Vec<Box<dyn StatusResolver>>,
@@ -39,12 +30,9 @@ struct MockProvider {
 
 impl MockProvider {
     fn new() -> Self {
-        let resolvers: Vec<Box<dyn StatusResolver>> = vec![Box::new(TextMatchResolver::new(
-            MOCK_TEXT_RULES,
-            20,
-            AgentStatus::Unknown,
-        ))];
-        Self { resolvers }
+        Self {
+            resolvers: vec![Box::new(MockResolver)],
+        }
     }
 }
 
@@ -116,6 +104,28 @@ fn make_session_with_root(
         started_at: Some(SystemTime::now() - std::time::Duration::from_secs(started_secs_ago)),
         source,
         git_root: git_root.map(|s| s.to_string()),
+    }
+}
+
+fn make_session_with_pane(
+    provider: &str,
+    cwd: &str,
+    status: AgentStatus,
+    tmux_session: &str,
+    tmux_pane: &str,
+    source: SessionSource,
+    started_secs_ago: u64,
+) -> AgentSession {
+    AgentSession {
+        kind: SessionKind::Managed,
+        tmux_session: tmux_session.into(),
+        tmux_pane: tmux_pane.into(),
+        provider: provider.into(),
+        cwd: PathBuf::from(cwd),
+        status,
+        started_at: Some(SystemTime::now() - std::time::Duration::from_secs(started_secs_ago)),
+        source,
+        git_root: None,
     }
 }
 
@@ -862,4 +872,76 @@ bold = false
         );
     }).unwrap();
     // No panic = rendering works with custom theme
+}
+
+// ===== Kill Confirm & Selection Preservation Tests =====
+
+#[test]
+fn test_confirm_kill_survives_session_reorder() {
+    let sessions = vec![
+        make_session_with_pane("mock", "/code/a", AgentStatus::Waiting, "la/mock/a", "%1", SessionSource::Local, 300),
+        make_session_with_pane("mock", "/code/b", AgentStatus::Thinking, "la/mock/b", "%2", SessionSource::Local, 200),
+        make_session_with_pane("mock", "/code/c", AgentStatus::Idle, "la/mock/c", "%3", SessionSource::Local, 100),
+    ];
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::new())];
+    let sm = SessionManager::with_sessions(providers, sessions);
+    let mut app = App::new(sm);
+    app.refresh_sessions();
+
+    // Select session with pane %2 — find its sidebar index first
+    let target_sidebar_idx = app.sidebar_items.iter().position(|item| {
+        if let SidebarItem::Session(idx) = item {
+            app.sessions[*idx].tmux_pane == "%2"
+        } else {
+            false
+        }
+    }).expect("session %2 should be in sidebar");
+    while app.selected_index < target_sidebar_idx {
+        app.handle_key(key(KeyCode::Char('j')));
+    }
+    app.handle_key(key(KeyCode::Char('d')));
+    assert_eq!(app.confirm_kill, Some("%2".to_string()));
+
+    // Simulate bg refresh with reordered sessions (different started_at → different sort)
+    let reordered = vec![
+        make_session_with_pane("mock", "/code/c", AgentStatus::Idle, "la/mock/c", "%3", SessionSource::Local, 300),
+        make_session_with_pane("mock", "/code/a", AgentStatus::Waiting, "la/mock/a", "%1", SessionSource::Local, 200),
+        make_session_with_pane("mock", "/code/b", AgentStatus::Thinking, "la/mock/b", "%2", SessionSource::Local, 100),
+    ];
+    app.update_sessions(reordered);
+
+    // confirm_kill still points to %2
+    assert_eq!(app.confirm_kill, Some("%2".to_string()));
+}
+
+#[test]
+fn test_selection_preserved_across_refresh() {
+    let sessions = vec![
+        make_session_with_pane("mock", "/code/a", AgentStatus::Waiting, "la/mock/a", "%10", SessionSource::Local, 300),
+        make_session_with_pane("mock", "/code/b", AgentStatus::Thinking, "la/mock/b", "%20", SessionSource::Local, 200),
+        make_session_with_pane("mock", "/code/c", AgentStatus::Idle, "la/mock/c", "%30", SessionSource::Local, 100),
+    ];
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider::new())];
+    let sm = SessionManager::with_sessions(providers, sessions);
+    let mut app = App::new(sm);
+    app.refresh_sessions();
+
+    // Navigate down to select %20
+    app.handle_key(key(KeyCode::Char('j')));
+    // Record which pane is selected
+    let selected_before = app.selected_session().map(|s| s.tmux_pane.clone());
+    assert_eq!(app.selected_pane, selected_before);
+
+    // Simulate bg refresh with reordered sessions
+    let reordered = vec![
+        make_session_with_pane("mock", "/code/c", AgentStatus::Idle, "la/mock/c", "%30", SessionSource::Local, 300),
+        make_session_with_pane("mock", "/code/b", AgentStatus::Thinking, "la/mock/b", "%20", SessionSource::Local, 200),
+        make_session_with_pane("mock", "/code/a", AgentStatus::Waiting, "la/mock/a", "%10", SessionSource::Local, 100),
+    ];
+    app.update_sessions(reordered);
+
+    // Selection should still point to the same pane
+    let selected_after = app.selected_session().map(|s| s.tmux_pane.clone());
+    assert_eq!(selected_before, selected_after, "selection should survive reorder");
+    assert_eq!(app.selected_pane, selected_after);
 }
