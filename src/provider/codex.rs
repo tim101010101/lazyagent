@@ -112,6 +112,35 @@ impl StatusResolver for CodexJsonlResolver {
     }
 }
 
+// ===== Pane Output Fallback (idle/prompt detection) =====
+
+struct CodexPaneResolver;
+
+impl StatusResolver for CodexPaneResolver {
+    fn resolve(&self, ctx: &ResolveContext) -> Option<AgentStatus> {
+        let output = ctx.pane_output();
+        let lines: Vec<&str> = output
+            .lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(5)
+            .collect();
+
+        for line in &lines {
+            let trimmed = line.trim();
+            // Codex uses › (U+203A) for its idle prompt
+            if trimmed.starts_with('›') || trimmed.starts_with('>') {
+                return Some(AgentStatus::Waiting);
+            }
+            if trimmed.contains("esc to interrupt") || trimmed.contains("working") {
+                return Some(AgentStatus::Thinking);
+            }
+        }
+
+        None
+    }
+}
+
 // ===== Provider =====
 
 pub struct CodexProvider {
@@ -120,7 +149,10 @@ pub struct CodexProvider {
 
 impl CodexProvider {
     pub fn new() -> Self {
-        let resolvers: Vec<Box<dyn StatusResolver>> = vec![Box::new(CodexJsonlResolver::new())];
+        let resolvers: Vec<Box<dyn StatusResolver>> = vec![
+            Box::new(CodexJsonlResolver::new()),
+            Box::new(CodexPaneResolver),
+        ];
         Self { resolvers }
     }
 }
@@ -245,5 +277,32 @@ mod tests {
         assert_eq!(status, Some(AgentStatus::Thinking));
 
         std::fs::remove_file(&path).ok();
+    }
+
+    fn mock_pane_ctx(output: &str) -> ResolveContext {
+        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, None);
+        let _ = ctx.pane_output.set(output.to_string());
+        ctx
+    }
+
+    #[test]
+    fn test_pane_resolver_waiting_prompt() {
+        let r = CodexPaneResolver;
+        let ctx = mock_pane_ctx("  gpt-5.4 xhigh · 100% left · ~/.dotfiles\n\n› ");
+        assert_eq!(r.resolve(&ctx), Some(AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn test_pane_resolver_waiting_with_text() {
+        let r = CodexPaneResolver;
+        let ctx = mock_pane_ctx("› Write tests for @filename");
+        assert_eq!(r.resolve(&ctx), Some(AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn test_pane_resolver_no_match() {
+        let r = CodexPaneResolver;
+        let ctx = mock_pane_ctx("random output");
+        assert_eq!(r.resolve(&ctx), None);
     }
 }

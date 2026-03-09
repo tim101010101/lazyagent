@@ -24,9 +24,12 @@ impl ClaudeJsonlResolver {
         }
     }
 
-    /// Encode cwd to Claude's project dir format: /foo/bar → -foo-bar
+    /// Encode cwd to Claude's project dir format.
+    /// All non-alphanumeric chars become `-`: /Users/didi/.dotfiles → -Users-didi--dotfiles
     fn encode_cwd(cwd: &str) -> String {
-        cwd.replace('/', "-")
+        cwd.chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
     }
 
     /// Find the best JSONL file for a given cwd.
@@ -216,6 +219,40 @@ impl StatusResolver for ClaudeJsonlResolver {
     }
 }
 
+// ===== Pane Output Fallback (idle/prompt detection) =====
+
+struct ClaudePaneResolver;
+
+impl StatusResolver for ClaudePaneResolver {
+    fn resolve(&self, ctx: &ResolveContext) -> Option<AgentStatus> {
+        let output = ctx.pane_output();
+        let lines: Vec<&str> = output
+            .lines()
+            .rev()
+            .filter(|l| !l.trim().is_empty())
+            .take(10)
+            .collect();
+
+        for line in &lines {
+            let trimmed = line.trim();
+            if trimmed.contains("esc to interrupt") {
+                return Some(AgentStatus::Thinking);
+            }
+            if trimmed.ends_with("thinking)") {
+                return Some(AgentStatus::Thinking);
+            }
+            if trimmed.contains("Enter to select") {
+                return Some(AgentStatus::NeedsInput);
+            }
+            if trimmed.starts_with('❯') {
+                return Some(AgentStatus::Waiting);
+            }
+        }
+
+        None
+    }
+}
+
 // ===== Provider =====
 
 pub struct ClaudeProvider {
@@ -224,7 +261,10 @@ pub struct ClaudeProvider {
 
 impl ClaudeProvider {
     pub fn new() -> Self {
-        let resolvers: Vec<Box<dyn StatusResolver>> = vec![Box::new(ClaudeJsonlResolver::new())];
+        let resolvers: Vec<Box<dyn StatusResolver>> = vec![
+            Box::new(ClaudeJsonlResolver::new()),
+            Box::new(ClaudePaneResolver),
+        ];
         Self { resolvers }
     }
 }
@@ -277,6 +317,10 @@ mod tests {
             "-home-user-Code-project"
         );
         assert_eq!(ClaudeJsonlResolver::encode_cwd("/tmp"), "-tmp");
+        assert_eq!(
+            ClaudeJsonlResolver::encode_cwd("/Users/didi/.dotfiles"),
+            "-Users-didi--dotfiles"
+        );
     }
 
     #[test]
@@ -454,5 +498,39 @@ mod tests {
         assert_eq!(status, Some(AgentStatus::NeedsInput));
 
         std::fs::remove_file(jsonl_path).ok();
+    }
+
+    fn mock_pane_ctx(output: &str) -> ResolveContext {
+        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, None);
+        let _ = ctx.pane_output.set(output.to_string());
+        ctx
+    }
+
+    #[test]
+    fn test_pane_resolver_waiting() {
+        let r = ClaudePaneResolver;
+        let ctx = mock_pane_ctx("✻ Worked for 2m\n\n❯\u{a0}\n────────── ▪▪▪ ─\n  ⏵⏵ bypass permissions\n");
+        assert_eq!(r.resolve(&ctx), Some(AgentStatus::Waiting));
+    }
+
+    #[test]
+    fn test_pane_resolver_thinking() {
+        let r = ClaudePaneResolver;
+        let ctx = mock_pane_ctx("✽ Gitifying… (1m 7s · ↑ 856 tokens · thinking)\n\n  ⏵⏵ bypass permissions · esc to interrupt\n");
+        assert_eq!(r.resolve(&ctx), Some(AgentStatus::Thinking));
+    }
+
+    #[test]
+    fn test_pane_resolver_needs_input() {
+        let r = ClaudePaneResolver;
+        let ctx = mock_pane_ctx("Which option?\nEnter to select · Tab/Arrow keys to navigate\n");
+        assert_eq!(r.resolve(&ctx), Some(AgentStatus::NeedsInput));
+    }
+
+    #[test]
+    fn test_pane_resolver_no_match() {
+        let r = ClaudePaneResolver;
+        let ctx = mock_pane_ctx("random output");
+        assert_eq!(r.resolve(&ctx), None);
     }
 }

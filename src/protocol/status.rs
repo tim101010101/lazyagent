@@ -1,3 +1,4 @@
+use std::cell::OnceCell;
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -12,6 +13,7 @@ pub struct ResolveContext {
     pub matched_pid: Option<u32>,
     pub pane_cwd: String,
     pub pane_id: String,
+    pub(crate) pane_output: OnceCell<String>,
     pub process_start_time: Option<u64>,
 }
 
@@ -28,8 +30,22 @@ impl ResolveContext {
             matched_pid,
             pane_cwd,
             pane_id,
+            pane_output: OnceCell::new(),
             process_start_time,
         }
+    }
+
+    /// Lazy fetch pane output via tmux capture-pane. Only called if needed.
+    pub fn pane_output(&self) -> &str {
+        self.pane_output.get_or_init(|| {
+            Command::new("tmux")
+                .args(["capture-pane", "-p", "-t", &self.pane_id])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default()
+        })
     }
 }
 
