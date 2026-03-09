@@ -253,7 +253,7 @@ fn capture_pane_status(
     provider_id: &str,
 ) -> AgentStatus {
     let output = match Command::new("tmux")
-        .args(["capture-pane", "-p", "-t", pane_id, "-S", "-5"])
+        .args(["capture-pane", "-p", "-t", pane_id])
         .output()
     {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
