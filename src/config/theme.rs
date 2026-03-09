@@ -226,14 +226,14 @@ bold = false
 
     #[test]
     fn test_theme_from_config_partial_override() {
-        let toml_str = r#"
+        let toml_str = r##"
 [title]
 fg = "green"
 bold = false
 
 [error]
 fg = "#ff8800"
-"#;
+"##;
         let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
         let theme = crate::tui::theme::Theme::from_config(&cfg);
         assert_eq!(theme.title.fg, Some(Color::Green));

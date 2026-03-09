@@ -579,3 +579,263 @@ fn test_mixed_git_root_and_none_grouping() {
     let session_count = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::Session(_))).count();
     assert_eq!(session_count, 3);
 }
+
+// ===== Custom Keybinding Dispatch Tests =====
+
+#[test]
+fn test_custom_quit_key() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.quit = "x".into();
+        cfg
+    });
+
+    assert!(app.running);
+    // Old 'q' should NOT quit now (it's unbound)
+    app.handle_key(key(KeyCode::Char('q')));
+    assert!(app.running);
+    // New 'x' should quit
+    app.handle_key(key(KeyCode::Char('x')));
+    assert!(!app.running);
+}
+
+#[test]
+fn test_custom_nav_keys() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/a", AgentStatus::Waiting, "la/mock/a", SessionSource::Local, 100),
+        make_session("mock", "/code/b", AgentStatus::Waiting, "la/mock/b", SessionSource::Local, 200),
+        make_session("mock", "/code/c", AgentStatus::Waiting, "la/mock/c", SessionSource::Local, 300),
+    ]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.down = "n".into();
+        cfg.up = "p".into();
+        cfg.top = "H".into();
+        cfg.bottom = "L".into();
+        cfg
+    });
+
+    let start = app.selected_index;
+    app.handle_key(key(KeyCode::Char('n'))); // custom down
+    assert_ne!(app.selected_index, start);
+
+    app.handle_key(key(KeyCode::Char('H'))); // custom top
+    // Should be at first session
+    assert!(matches!(app.sidebar_items.get(app.selected_index), Some(SidebarItem::Session(_))));
+
+    app.handle_key(key(KeyCode::Char('L'))); // custom bottom
+    assert!(matches!(app.sidebar_items.get(app.selected_index), Some(SidebarItem::Session(_))));
+}
+
+#[test]
+fn test_custom_detail_keys() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.detail_show = "o".into();
+        cfg.detail_hide = "c".into();
+        cfg
+    });
+
+    assert!(app.show_detail);
+    app.handle_key(key(KeyCode::Char('c'))); // custom hide
+    assert!(!app.show_detail);
+    app.handle_key(key(KeyCode::Char('o'))); // custom show
+    assert!(app.show_detail);
+}
+
+#[test]
+fn test_custom_kill_key() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.kill = "x".into();
+        cfg
+    });
+
+    assert!(app.confirm_kill.is_none());
+    app.handle_key(key(KeyCode::Char('d'))); // old key should not work
+    assert!(app.confirm_kill.is_none());
+    app.handle_key(key(KeyCode::Char('x'))); // custom kill
+    assert!(app.confirm_kill.is_some());
+}
+
+#[test]
+fn test_custom_search_key() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.search = "s".into();
+        cfg
+    });
+
+    assert!(!app.search_mode);
+    app.handle_key(key(KeyCode::Char('/'))); // old key should not work
+    assert!(!app.search_mode);
+    app.handle_key(key(KeyCode::Char('s'))); // custom search
+    assert!(app.search_mode);
+}
+
+#[test]
+fn test_custom_passthrough_key() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.passthrough = "p".into();
+        cfg
+    });
+
+    assert!(!app.passthrough_mode);
+    app.handle_key(key(KeyCode::Char('p'))); // custom passthrough
+    assert!(app.passthrough_mode);
+}
+
+#[test]
+fn test_esc_always_quits_regardless_of_binding() {
+    let mut app = make_app(vec![]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.quit = "x".into();
+        cfg
+    });
+
+    // Esc is a hardcoded fallback in handle_key
+    app.handle_key(key(KeyCode::Esc));
+    assert!(!app.running);
+}
+
+#[test]
+fn test_arrow_keys_always_navigate() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/a", AgentStatus::Waiting, "la/mock/a", SessionSource::Local, 100),
+        make_session("mock", "/code/b", AgentStatus::Waiting, "la/mock/b", SessionSource::Local, 200),
+    ]);
+    app.keys = crate::config::KeyBindings::from_config(&{
+        let mut cfg = crate::config::KeysConfig::default();
+        cfg.down = "x".into(); // remap j away
+        cfg.up = "y".into();   // remap k away
+        cfg
+    });
+
+    let start = app.selected_index;
+    // Arrow keys are hardcoded fallback
+    app.handle_key(key(KeyCode::Down));
+    assert!(app.selected_index != start || app.sessions.len() <= 1);
+}
+
+// ===== Rendering with Custom Config =====
+
+#[test]
+fn test_render_custom_layout_percentages() {
+    let app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+
+    let mut app = app;
+    app.layout_config = crate::config::LayoutConfig {
+        sidebar_percent: 40,
+        main_percent: 40,
+        sidebar_2col_percent: 50,
+    };
+
+    let backend = TestBackend::new(120, 40);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    // 3-col mode
+    terminal.draw(|frame| {
+        let layout = AppLayout::new(frame.area(), true, &app.layout_config);
+        assert!(layout.sidebar.width > 0);
+        assert!(layout.main.width > 0);
+        assert!(layout.detail.is_some());
+        crate::tui::sidebar::render(
+            frame, layout.sidebar, &app.sidebar_items, &app.sessions,
+            app.selected_index, true, &app.grouping_mode, app.tick,
+            &app.theme, &app.sidebar_config,
+        );
+    }).unwrap();
+
+    // 2-col mode
+    terminal.draw(|frame| {
+        let layout = AppLayout::new(frame.area(), false, &app.layout_config);
+        assert!(layout.detail.is_none());
+        // sidebar_2col_percent=50 → sidebar takes half
+        assert!(layout.sidebar.width >= 50);
+    }).unwrap();
+}
+
+#[test]
+fn test_render_custom_sidebar_markers() {
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+    app.sidebar_config = crate::config::SidebarConfig {
+        local_marker: "L".into(),
+        remote_marker: "R".into(),
+    };
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| {
+        let layout = AppLayout::new(frame.area(), false, &app.layout_config);
+        crate::tui::sidebar::render(
+            frame, layout.sidebar, &app.sidebar_items, &app.sessions,
+            app.selected_index, true, &app.grouping_mode, app.tick,
+            &app.theme, &app.sidebar_config,
+        );
+    }).unwrap();
+
+    // Verify the "L" marker appears in the rendered buffer
+    let buf = terminal.backend().buffer().clone();
+    let content: String = (0..buf.area.width)
+        .map(|x| buf.cell((x, 1)).map(|c| c.symbol().to_string()).unwrap_or_default())
+        .collect();
+    assert!(content.contains("L"), "custom local marker 'L' should appear in sidebar, got: {content}");
+}
+
+#[test]
+fn test_render_custom_theme_colors() {
+    let toml_str = r#"
+[title]
+fg = "green"
+bold = false
+"#;
+    let theme_cfg: crate::config::ThemeConfig = toml::from_str(toml_str).unwrap();
+    let mut app = make_app(vec![
+        make_session("mock", "/code/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
+    ]);
+    app.theme = crate::tui::theme::Theme::from_config(&theme_cfg);
+
+    assert_eq!(app.theme.title.fg, Some(ratatui::style::Color::Green));
+
+    let backend = TestBackend::new(80, 20);
+    let mut terminal = Terminal::new(backend).unwrap();
+
+    terminal.draw(|frame| {
+        let layout = AppLayout::new(frame.area(), true, &app.layout_config);
+        crate::tui::sidebar::render(
+            frame, layout.sidebar, &app.sidebar_items, &app.sessions,
+            app.selected_index, true, &app.grouping_mode, app.tick,
+            &app.theme, &app.sidebar_config,
+        );
+        if let Some(detail_area) = layout.detail {
+            crate::tui::detail::render(frame, detail_area, app.selected_session(), &app.theme);
+        }
+        crate::tui::help::render(
+            frame, layout.help_bar, app.search_mode, &app.search_query,
+            app.confirm_kill.is_some(), app.passthrough_mode, &app.theme,
+        );
+    }).unwrap();
+    // No panic = rendering works with custom theme
+}
