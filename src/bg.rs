@@ -1,6 +1,8 @@
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 
+use tracing::debug;
+
 use crate::protocol::{AgentSession, Provider};
 use crate::tmux::TmuxController;
 
@@ -25,12 +27,15 @@ pub fn spawn_worker(
         while let Ok(req) = req_rx.recv() {
             match req {
                 BgRequest::Refresh => {
+                    debug!("bg: refresh requested");
                     let sessions = TmuxController::discover_sessions(&providers);
+                    debug!(count = sessions.len(), "bg: refresh complete");
                     if upd_tx.send(BgUpdate::Sessions(sessions)).is_err() {
                         break;
                     }
                 }
                 BgRequest::Capture { pane_id } => {
+                    debug!(pane_id = %pane_id, "bg: capture requested");
                     if let Some(content) = TmuxController::capture_pane(&pane_id) {
                         if upd_tx
                             .send(BgUpdate::Preview { pane_id, content })

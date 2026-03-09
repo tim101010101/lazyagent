@@ -69,6 +69,29 @@ fn make_session(
         status,
         started_at: Some(SystemTime::now() - std::time::Duration::from_secs(started_secs_ago)),
         source,
+        git_root: None,
+    }
+}
+
+fn make_session_with_root(
+    provider: &str,
+    cwd: &str,
+    status: AgentStatus,
+    tmux_session: &str,
+    source: SessionSource,
+    started_secs_ago: u64,
+    git_root: Option<&str>,
+) -> AgentSession {
+    AgentSession {
+        kind: SessionKind::Managed,
+        tmux_session: tmux_session.into(),
+        tmux_pane: "%0".into(),
+        provider: provider.into(),
+        cwd: PathBuf::from(cwd),
+        status,
+        started_at: Some(SystemTime::now() - std::time::Duration::from_secs(started_secs_ago)),
+        source,
+        git_root: git_root.map(|s| s.to_string()),
     }
 }
 
@@ -110,15 +133,10 @@ fn test_flat_mode_no_group_headers() {
 #[test]
 fn test_git_root_mode_groups_by_root() {
     let mut app = make_app(vec![
-        make_session("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100),
-        make_session("mock", "/code/repo-a/lib", AgentStatus::Thinking, "la/mock/lib", SessionSource::Local, 200),
-        make_session("mock", "/code/repo-b/app", AgentStatus::Idle, "la/mock/app", SessionSource::Local, 300),
+        make_session_with_root("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100, Some("repo-a")),
+        make_session_with_root("mock", "/code/repo-a/lib", AgentStatus::Thinking, "la/mock/lib", SessionSource::Local, 200, Some("repo-a")),
+        make_session_with_root("mock", "/code/repo-b/app", AgentStatus::Idle, "la/mock/app", SessionSource::Local, 300, Some("repo-b")),
     ]);
-
-    // Inject git root cache to avoid subprocess calls
-    app.set_git_root(PathBuf::from("/code/repo-a/src"), Some("repo-a".into()));
-    app.set_git_root(PathBuf::from("/code/repo-a/lib"), Some("repo-a".into()));
-    app.set_git_root(PathBuf::from("/code/repo-b/app"), Some("repo-b".into()));
 
     app.grouping_mode = GroupingMode::GitRoot;
     app.rebuild_sidebar();
@@ -135,12 +153,9 @@ fn test_git_root_mode_groups_by_root() {
 #[test]
 fn test_git_root_mode_ungrouped_bucket() {
     let mut app = make_app(vec![
-        make_session("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100),
-        make_session("mock", "/tmp/scratch", AgentStatus::Idle, "la/mock/scratch", SessionSource::Local, 200),
+        make_session_with_root("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100, Some("repo-a")),
+        make_session_with_root("mock", "/tmp/scratch", AgentStatus::Idle, "la/mock/scratch", SessionSource::Local, 200, None),
     ]);
-
-    app.set_git_root(PathBuf::from("/code/repo-a/src"), Some("repo-a".into()));
-    app.set_git_root(PathBuf::from("/tmp/scratch"), None); // not a git dir
 
     app.grouping_mode = GroupingMode::GitRoot;
     app.rebuild_sidebar();
@@ -244,12 +259,10 @@ fn test_navigation_skips_headers() {
 #[test]
 fn test_navigation_skips_headers_git_mode() {
     let mut app = make_app(vec![
-        make_session("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100),
-        make_session("mock", "/code/repo-b/app", AgentStatus::Idle, "la/mock/app", SessionSource::Local, 200),
+        make_session_with_root("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100, Some("repo-a")),
+        make_session_with_root("mock", "/code/repo-b/app", AgentStatus::Idle, "la/mock/app", SessionSource::Local, 200, Some("repo-b")),
     ]);
 
-    app.set_git_root(PathBuf::from("/code/repo-a/src"), Some("repo-a".into()));
-    app.set_git_root(PathBuf::from("/code/repo-b/app"), Some("repo-b".into()));
     app.grouping_mode = GroupingMode::GitRoot;
     app.rebuild_sidebar();
 
@@ -316,7 +329,7 @@ fn test_status_icons_render() {
 
     terminal
         .draw(|frame| {
-            let layout = AppLayout::new(frame.area(), app.show_detail);
+            let layout = AppLayout::new(frame.area(), app.show_detail, &app.layout_config);
             crate::tui::sidebar::render(
                 frame,
                 layout.sidebar,
@@ -326,6 +339,8 @@ fn test_status_icons_render() {
                 true,
                 &app.grouping_mode,
                 app.tick,
+                &app.theme,
+                &app.sidebar_config,
             );
         })
         .unwrap();
@@ -347,9 +362,9 @@ fn test_detail_shows_selected_session() {
 
     terminal
         .draw(|frame| {
-            let layout = AppLayout::new(frame.area(), true);
+            let layout = AppLayout::new(frame.area(), true, &app.layout_config);
             if let Some(detail_area) = layout.detail {
-                crate::tui::detail::render(frame, detail_area, app.selected_session());
+                crate::tui::detail::render(frame, detail_area, app.selected_session(), &app.theme);
             }
         })
         .unwrap();
@@ -391,7 +406,7 @@ fn test_cjk_rendering_safety() {
 
     terminal
         .draw(|frame| {
-            let layout = AppLayout::new(frame.area(), false);
+            let layout = AppLayout::new(frame.area(), false, &app.layout_config);
             crate::tui::sidebar::render(
                 frame,
                 layout.sidebar,
@@ -401,6 +416,8 @@ fn test_cjk_rendering_safety() {
                 true,
                 &app.grouping_mode,
                 app.tick,
+                &app.theme,
+                &app.sidebar_config,
             );
         })
         .unwrap();
@@ -471,7 +488,7 @@ fn test_render_narrow_terminal() {
 
     terminal
         .draw(|frame| {
-            let layout = AppLayout::new(frame.area(), false);
+            let layout = AppLayout::new(frame.area(), false, &app.layout_config);
             crate::tui::sidebar::render(
                 frame,
                 layout.sidebar,
@@ -481,6 +498,8 @@ fn test_render_narrow_terminal() {
                 true,
                 &app.grouping_mode,
                 app.tick,
+                &app.theme,
+                &app.sidebar_config,
             );
         })
         .unwrap();
@@ -491,4 +510,72 @@ fn test_grouping_mode_label() {
     assert_eq!(GroupingMode::Flat.label(), "flat");
     assert_eq!(GroupingMode::GitRoot.label(), "git");
     assert_eq!(GroupingMode::Custom.label(), "custom");
+}
+
+#[test]
+fn test_git_root_preserved_through_update_sessions() {
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider)];
+    let sm = SessionManager::with_sessions(providers, vec![]);
+    let mut app = App::new(sm);
+
+    // Simulate bg worker delivering sessions with pre-computed git_root
+    let sessions = vec![
+        make_session_with_root("mock", "/code/repo-a/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100, Some("repo-a")),
+        make_session_with_root("mock", "/code/repo-b/app", AgentStatus::Idle, "la/mock/app", SessionSource::Local, 200, Some("repo-b")),
+    ];
+
+    app.grouping_mode = GroupingMode::GitRoot;
+    app.update_sessions(sessions);
+
+    // git_root should flow through to sidebar grouping
+    let group_headers: Vec<_> = app.sidebar_items.iter()
+        .filter_map(|i| if let SidebarItem::GroupHeader(name) = i { Some(name.clone()) } else { None })
+        .collect();
+    assert_eq!(group_headers, vec!["repo-a", "repo-b"]);
+}
+
+#[test]
+fn test_git_root_none_becomes_ungrouped_in_update_sessions() {
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider)];
+    let sm = SessionManager::with_sessions(providers, vec![]);
+    let mut app = App::new(sm);
+
+    // Sessions without git_root (e.g. non-git dirs)
+    let sessions = vec![
+        make_session("mock", "/tmp/scratch", AgentStatus::Waiting, "la/mock/scratch", SessionSource::Local, 100),
+    ];
+
+    app.grouping_mode = GroupingMode::GitRoot;
+    app.update_sessions(sessions);
+
+    let group_headers: Vec<_> = app.sidebar_items.iter()
+        .filter_map(|i| if let SidebarItem::GroupHeader(name) = i { Some(name.clone()) } else { None })
+        .collect();
+    assert_eq!(group_headers, vec!["ungrouped"]);
+}
+
+#[test]
+fn test_mixed_git_root_and_none_grouping() {
+    let providers: Vec<Box<dyn Provider>> = vec![Box::new(MockProvider)];
+    let sm = SessionManager::with_sessions(providers, vec![]);
+    let mut app = App::new(sm);
+
+    let sessions = vec![
+        make_session_with_root("mock", "/code/repo/src", AgentStatus::Waiting, "la/mock/src", SessionSource::Local, 100, Some("repo")),
+        make_session("mock", "/tmp/no-git", AgentStatus::Idle, "la/mock/nogit", SessionSource::Local, 200),
+        make_session_with_root("mock", "/code/repo/lib", AgentStatus::Thinking, "la/mock/lib", SessionSource::Local, 300, Some("repo")),
+    ];
+
+    app.grouping_mode = GroupingMode::GitRoot;
+    app.update_sessions(sessions);
+
+    let group_headers: Vec<_> = app.sidebar_items.iter()
+        .filter_map(|i| if let SidebarItem::GroupHeader(name) = i { Some(name.clone()) } else { None })
+        .collect();
+    assert!(group_headers.contains(&"repo".to_string()));
+    assert!(group_headers.contains(&"ungrouped".to_string()));
+
+    // 2 sessions under "repo", 1 under "ungrouped"
+    let session_count = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::Session(_))).count();
+    assert_eq!(session_count, 3);
 }

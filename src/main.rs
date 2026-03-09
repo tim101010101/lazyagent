@@ -2,6 +2,7 @@ mod app;
 mod bg;
 mod config;
 mod event;
+mod log;
 mod protocol;
 mod provider;
 mod session;
@@ -9,7 +10,7 @@ mod tmux;
 mod tui;
 
 use std::io::IsTerminal;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ansi_to_tui::IntoText;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -18,6 +19,7 @@ use ratatui::{
     text::{Line, Span, Text},
     widgets::{Block, Borders, Paragraph},
 };
+use tracing::{error, info};
 
 use app::App;
 use bg::BgRequest;
@@ -25,14 +27,10 @@ use provider::claude::ClaudeProvider;
 use session::SessionManager;
 use tmux::TmuxController;
 use tui::layout::AppLayout;
-use tui::theme::Theme;
-
-const REFRESH_INTERVAL_TICKS: u32 = 20; // 20 * 100ms = 2s
-const PREVIEW_INTERVAL_TICKS: u32 = 2; // 2 * 100ms = 200ms
-const PASSTHROUGH_PREVIEW_TICKS: u32 = 1; // 1 * 100ms = 100ms
-const DOUBLE_ESC_TIMEOUT: Duration = Duration::from_millis(300);
 
 fn main() -> anyhow::Result<()> {
+    let _log_guard = log::init_logging();
+
     if !std::io::stdout().is_terminal() {
         anyhow::bail!("lazyagent requires an interactive terminal (TTY)");
     }
@@ -40,6 +38,8 @@ fn main() -> anyhow::Result<()> {
     if !TmuxController::tmux_available() {
         anyhow::bail!("lazyagent requires tmux. Please install tmux and try again.");
     }
+
+    info!("lazyagent started");
 
     // Restore terminal on panic
     let default_panic = std::panic::take_hook();
@@ -78,7 +78,7 @@ fn main() -> anyhow::Result<()> {
 
         // Draw
         terminal.draw(|frame| {
-            let layout = AppLayout::new(frame.area(), app.show_detail);
+            let layout = AppLayout::new(frame.area(), app.show_detail, &app.layout_config);
 
             // Sidebar
             tui::sidebar::render(
@@ -90,6 +90,8 @@ fn main() -> anyhow::Result<()> {
                 true,
                 &app.grouping_mode,
                 app.tick,
+                &app.theme,
+                &app.sidebar_config,
             );
 
             // Main area — pane preview
@@ -97,7 +99,7 @@ fn main() -> anyhow::Result<()> {
 
             // Detail panel
             if let Some(detail_area) = layout.detail {
-                tui::detail::render(frame, detail_area, app.selected_session());
+                tui::detail::render(frame, detail_area, app.selected_session(), &app.theme);
             }
 
             // Help bar
@@ -108,11 +110,12 @@ fn main() -> anyhow::Result<()> {
                 &app.search_query,
                 app.confirm_kill.is_some(),
                 app.passthrough_mode,
+                &app.theme,
             );
         })?;
 
         // Handle events
-        if let Some(ev) = event::poll_event(Duration::from_millis(100))? {
+        if let Some(ev) = event::poll_event(app.timing.poll_tick_duration())? {
             match ev {
                 event::AppEvent::Key(key) => {
                     // Passthrough mode: forward keys to tmux pane
@@ -130,20 +133,22 @@ fn main() -> anyhow::Result<()> {
                         continue;
                     }
 
-                    if key.code == KeyCode::Enter
+                    if key.code == app.keys.attach
                         && !app.search_mode
                         && app.confirm_kill.is_none()
                     {
                         // Attach to selected session
                         if let Some(session) = app.selected_session() {
+                            info!(target = %session.tmux_session, "attaching to session");
                             let mut cmd = app.session_manager().attach_command(session);
                             tui::restore()?;
                             let _ = cmd.status();
+                            info!("returned from attach");
                             terminal = tui::init()?;
                             let _ = bg_tx.send(BgRequest::Refresh);
                             continue;
                         }
-                    } else if key.code == KeyCode::Char('n')
+                    } else if key.code == app.keys.new_session
                         && !app.search_mode
                         && app.confirm_kill.is_none()
                     {
@@ -152,6 +157,7 @@ fn main() -> anyhow::Result<()> {
                             let cwd = std::env::current_dir().unwrap_or_default();
                             match app.session_manager().spawn(&provider_id, &cwd) {
                                 Ok(session_name) => {
+                                    info!(session = %session_name, "spawned new session");
                                     let mut cmd = TmuxController::attach_command(&session_name);
                                     tui::restore()?;
                                     let _ = cmd.status();
@@ -159,6 +165,7 @@ fn main() -> anyhow::Result<()> {
                                     let _ = bg_tx.send(BgRequest::Refresh);
                                 }
                                 Err(e) => {
+                                    error!("spawn failed: {e}");
                                     app.error_message = Some(format!("spawn failed: {e}"));
                                 }
                             }
@@ -177,15 +184,15 @@ fn main() -> anyhow::Result<()> {
                     preview_counter += 1;
                     app.tick += 1;
 
-                    if tick_counter >= REFRESH_INTERVAL_TICKS {
+                    if tick_counter >= app.timing.refresh_ticks() {
                         tick_counter = 0;
                         let _ = bg_tx.send(BgRequest::Refresh);
                         preview_counter = 0;
                     } else {
                         let preview_interval = if app.passthrough_mode {
-                            PASSTHROUGH_PREVIEW_TICKS
+                            app.timing.passthrough_preview_ticks()
                         } else {
-                            PREVIEW_INTERVAL_TICKS
+                            app.timing.preview_ticks()
                         };
                         if preview_counter >= preview_interval {
                             preview_counter = 0;
@@ -202,6 +209,7 @@ fn main() -> anyhow::Result<()> {
     let _ = bg_handle.join();
 
     tui::restore()?;
+    info!("lazyagent exiting");
     Ok(())
 }
 
@@ -209,7 +217,7 @@ fn main() -> anyhow::Result<()> {
 fn handle_passthrough_key(app: &mut App, key: crossterm::event::KeyEvent, pane_id: &str) {
     if key.code == KeyCode::Esc {
         if let Some(first_esc) = app.last_esc_time {
-            if first_esc.elapsed() < DOUBLE_ESC_TIMEOUT {
+            if first_esc.elapsed() < app.timing.double_esc_duration() {
                 // Double-Esc: exit passthrough (don't send second Esc)
                 app.exit_passthrough();
                 return;
@@ -302,14 +310,14 @@ fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     };
 
     let border_style = if app.passthrough_mode {
-        Theme::passthrough_border()
+        app.theme.passthrough_border
     } else {
-        Theme::border_unfocused()
+        app.theme.border_unfocused
     };
 
     let block = Block::default()
         .title(title)
-        .title_style(Theme::title())
+        .title_style(app.theme.title)
         .borders(Borders::ALL)
         .border_style(border_style);
 
@@ -325,7 +333,7 @@ fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
     } else if let Some(ref err) = app.error_message {
         let content = vec![
             Line::from(""),
-            Line::from(Span::styled(err.as_str(), Theme::error())),
+            Line::from(Span::styled(err.as_str(), app.theme.error)),
         ];
         let paragraph = Paragraph::new(content).block(block);
         frame.render_widget(paragraph, area);
@@ -334,11 +342,11 @@ fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 "  No active agent sessions found.",
-                Theme::label(),
+                app.theme.label,
             )),
             Line::from(Span::styled(
                 "  Press 'n' to start a new session.",
-                Theme::label(),
+                app.theme.label,
             )),
         ];
         let paragraph = Paragraph::new(content).block(block);
@@ -348,7 +356,7 @@ fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
             Line::from(""),
             Line::from(Span::styled(
                 "  Select a session to preview",
-                Theme::label(),
+                app.theme.label,
             )),
         ];
         let paragraph = Paragraph::new(content).block(block);

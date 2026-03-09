@@ -1,6 +1,8 @@
 use std::path::Path;
 use std::process::Command;
 
+use tracing::info;
+
 use crate::protocol::{AgentSession, Provider};
 use crate::tmux::TmuxController;
 
@@ -37,6 +39,7 @@ impl SessionManager {
     }
 
     pub fn spawn(&self, provider_id: &str, cwd: &Path) -> anyhow::Result<String> {
+        info!(provider_id, cwd = %cwd.display(), "spawning session");
         let provider = self
             .providers
             .iter()
@@ -57,6 +60,7 @@ impl SessionManager {
     }
 
     pub fn kill(&self, session: &AgentSession) -> anyhow::Result<()> {
+        info!(session = %session.tmux_session, "killing session");
         TmuxController::kill_session(&session.tmux_session)
     }
 

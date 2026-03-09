@@ -14,6 +14,7 @@ pub fn render(
     search_query: &str,
     confirm_mode: bool,
     passthrough_mode: bool,
+    theme: &Theme,
 ) {
     let hints = if passthrough_mode {
         vec![("Esc+Esc", "exit passthrough")]
@@ -38,25 +39,25 @@ pub fn render(
     let mut spans = Vec::new();
 
     if search_mode {
-        spans.push(Span::styled(" /", Theme::title()));
-        spans.push(Span::styled(search_query, Theme::value()));
-        spans.push(Span::styled("  ", Theme::key_hint()));
+        spans.push(Span::styled(" /", theme.title));
+        spans.push(Span::styled(search_query, theme.value));
+        spans.push(Span::styled("  ", theme.key_hint));
     }
 
     if passthrough_mode {
-        spans.push(Span::styled(" PASSTHROUGH ", Theme::passthrough_indicator()));
+        spans.push(Span::styled(" PASSTHROUGH ", theme.passthrough_indicator));
     }
 
     if confirm_mode {
-        spans.push(Span::styled(" Kill session? ", Theme::error()));
+        spans.push(Span::styled(" Kill session? ", theme.error));
     }
 
     for (i, (key, action)) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ", Theme::key_hint()));
+            spans.push(Span::styled("  ", theme.key_hint));
         }
-        spans.push(Span::styled(*key, Theme::value()));
-        spans.push(Span::styled(format!(":{}", action), Theme::key_action()));
+        spans.push(Span::styled(*key, theme.value));
+        spans.push(Span::styled(format!(":{}", action), theme.key_action));
     }
 
     let line = Line::from(spans);

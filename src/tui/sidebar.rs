@@ -6,6 +6,7 @@ use ratatui::{
 };
 
 use crate::app::{GroupingMode, SidebarItem};
+use crate::config::SidebarConfig;
 use crate::protocol::{AgentSession, AgentStatus, SessionSource};
 use crate::tui::theme::Theme;
 
@@ -18,18 +19,20 @@ pub fn render(
     focused: bool,
     grouping_mode: &GroupingMode,
     tick: u64,
+    theme: &Theme,
+    sidebar_config: &SidebarConfig,
 ) {
     let border_style = if focused {
-        Theme::border_focused()
+        theme.border_focused
     } else {
-        Theme::border_unfocused()
+        theme.border_unfocused
     };
 
     let title = format!(" Sessions [{}] ", grouping_mode.label());
 
     let block = Block::default()
         .title(title)
-        .title_style(Theme::title())
+        .title_style(theme.title)
         .borders(Borders::ALL)
         .border_style(border_style);
 
@@ -37,22 +40,26 @@ pub fn render(
         .iter()
         .map(|item| match item {
             SidebarItem::SourceHeader(name) => {
-                let marker = if name == "local" { "●" } else { "◆" };
+                let marker = if name == "local" {
+                    &sidebar_config.local_marker
+                } else {
+                    &sidebar_config.remote_marker
+                };
                 ListItem::new(Line::from(Span::styled(
                     format!(" {} {} ", marker, name),
-                    Theme::source_header(),
+                    theme.source_header,
                 )))
             }
             SidebarItem::GroupHeader(name) => {
                 let display = shorten_path(name);
                 ListItem::new(Line::from(Span::styled(
                     format!("  {} ", display),
-                    Theme::project_header(),
+                    theme.project_header,
                 )))
             }
             SidebarItem::Session(idx) => {
                 if let Some(session) = sessions.get(*idx) {
-                    render_session_item(session, area.width, tick)
+                    render_session_item(session, area.width, tick, theme)
                 } else {
                     ListItem::new(Line::from(""))
                 }
@@ -65,13 +72,18 @@ pub fn render(
 
     let list = List::new(list_items)
         .block(block)
-        .highlight_style(Theme::selected());
+        .highlight_style(theme.selected);
 
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_session_item(session: &AgentSession, width: u16, tick: u64) -> ListItem<'static> {
-    let (icon, icon_style) = status_icon(&session.status, tick);
+fn render_session_item(
+    session: &AgentSession,
+    width: u16,
+    tick: u64,
+    theme: &Theme,
+) -> ListItem<'static> {
+    let (icon, icon_style) = status_icon(&session.status, tick, theme);
 
     let time_str = session
         .started_at
@@ -92,26 +104,30 @@ fn render_session_item(session: &AgentSession, width: u16, tick: u64) -> ListIte
     let cwd_display = truncate_str(&cwd_short, cwd_max);
 
     ListItem::new(Line::from(vec![
-        Span::styled("   ", Theme::normal()),
+        Span::styled("   ", theme.normal),
         Span::styled(icon.to_string(), icon_style),
-        Span::styled(format!(" {} ", session.provider), Theme::normal()),
-        Span::styled(cwd_display, Theme::label()),
-        Span::styled(format!("  {}", time_str), Theme::label()),
-        Span::styled(source_marker.to_string(), Theme::label()),
+        Span::styled(format!(" {} ", session.provider), theme.normal),
+        Span::styled(cwd_display, theme.label),
+        Span::styled(format!("  {}", time_str), theme.label),
+        Span::styled(source_marker.to_string(), theme.label),
     ]))
 }
 
 const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
-fn status_icon(status: &AgentStatus, tick: u64) -> (&'static str, ratatui::style::Style) {
+fn status_icon(
+    status: &AgentStatus,
+    tick: u64,
+    theme: &Theme,
+) -> (&'static str, ratatui::style::Style) {
     match status {
-        AgentStatus::Waiting | AgentStatus::Idle => ("●", Theme::status_active()),
+        AgentStatus::Waiting | AgentStatus::Idle => ("●", theme.status_active),
         AgentStatus::Thinking => {
             let frame = (tick as usize) % SPINNER_FRAMES.len();
-            (SPINNER_FRAMES[frame], Theme::status_thinking())
+            (SPINNER_FRAMES[frame], theme.status_thinking)
         }
-        AgentStatus::Error => ("✖", Theme::status_error()),
-        AgentStatus::Unknown => ("?", Theme::status_unknown()),
+        AgentStatus::Error => ("✖", theme.status_error),
+        AgentStatus::Unknown => ("?", theme.status_unknown),
     }
 }
 

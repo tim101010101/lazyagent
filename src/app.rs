@@ -1,14 +1,14 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::Instant;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use tracing::{trace, warn};
 
 use crate::bg::BgUpdate;
-use crate::config::{self, CustomGroup};
+use crate::config::{self, CustomGroup, KeyBindings, LayoutConfig, SidebarConfig, TimingConfig};
 use crate::protocol::{AgentSession, SessionSource};
 use crate::session::SessionManager;
+use crate::tui::theme::Theme;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum GroupingMode {
@@ -71,7 +71,11 @@ pub struct App {
     pub passthrough_mode: bool,
     pub last_esc_time: Option<Instant>,
     pub tick: u64,
-    git_root_cache: HashMap<PathBuf, Option<String>>,
+    pub theme: Theme,
+    pub keys: KeyBindings,
+    pub layout_config: LayoutConfig,
+    pub sidebar_config: SidebarConfig,
+    pub timing: TimingConfig,
     session_manager: SessionManager,
 }
 
@@ -95,17 +99,26 @@ impl App {
             passthrough_mode: false,
             last_esc_time: None,
             tick: 0,
-            git_root_cache: HashMap::new(),
+            theme: Theme::default(),
+            keys: KeyBindings::default(),
+            layout_config: LayoutConfig::default(),
+            sidebar_config: SidebarConfig::default(),
+            timing: TimingConfig::default(),
             session_manager,
         }
     }
 
-    /// Load grouping mode and custom groups from config.
+    /// Load all config sections.
     pub fn load_config(&mut self) {
         let cfg = config::load_config();
         self.grouping_mode = cfg.grouping_mode();
         self.custom_groups = cfg.group;
-        // If custom mode but no groups configured, fall back to flat
+        self.theme = Theme::from_config(&cfg.theme);
+        self.keys = KeyBindings::from_config(&cfg.keys);
+        self.layout_config = cfg.layout;
+        self.sidebar_config = cfg.sidebar;
+        self.timing = cfg.timing;
+        // If custom mode but no groups configured, fall back to git
         if self.grouping_mode == GroupingMode::Custom && self.custom_groups.is_empty() {
             self.grouping_mode = GroupingMode::GitRoot;
         }
@@ -189,8 +202,10 @@ impl App {
             std::collections::BTreeMap::new();
 
         for &idx in indices {
-            let root = self.resolve_git_root(&self.sessions[idx].cwd.clone());
-            let key = root.unwrap_or_else(|| "ungrouped".into());
+            let key = self.sessions[idx]
+                .git_root
+                .clone()
+                .unwrap_or_else(|| "ungrouped".into());
             by_root.entry(key).or_default().push(idx);
         }
 
@@ -243,31 +258,6 @@ impl App {
                 self.sidebar_items.push(SidebarItem::Session(idx));
             }
         }
-    }
-
-    /// Resolve git root for a path, using cache.
-    fn resolve_git_root(&mut self, cwd: &Path) -> Option<String> {
-        if let Some(cached) = self.git_root_cache.get(cwd) {
-            return cached.clone();
-        }
-
-        let result = Command::new("git")
-            .args(["rev-parse", "--show-toplevel"])
-            .current_dir(cwd)
-            .output()
-            .ok()
-            .filter(|o| o.status.success())
-            .map(|o| {
-                let full = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                // Use just the directory name as the group label
-                Path::new(&full)
-                    .file_name()
-                    .map(|n| n.to_string_lossy().to_string())
-                    .unwrap_or(full)
-            });
-
-        self.git_root_cache.insert(cwd.to_path_buf(), result.clone());
-        result
     }
 
     /// Apply a background update (sessions or preview).
@@ -349,6 +339,7 @@ impl App {
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) {
+        trace!(?key, "handle_key");
         // Ctrl+C always quits
         if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
             self.running = false;
@@ -362,6 +353,7 @@ impl App {
                     if let Some(idx) = self.confirm_kill.take() {
                         if let Some(session) = self.sessions.get(idx) {
                             if let Err(e) = self.session_manager.kill(session) {
+                                warn!("kill failed: {e}");
                                 self.error_message = Some(format!("kill failed: {e}"));
                             }
                             self.refresh_sessions();
@@ -380,29 +372,38 @@ impl App {
             return;
         }
 
-        match key.code {
-            KeyCode::Char('q') | KeyCode::Esc => self.running = false,
-            KeyCode::Char('j') | KeyCode::Down => self.move_selection(1),
-            KeyCode::Char('k') | KeyCode::Up => self.move_selection(-1),
-            KeyCode::Char('g') => self.move_to_top(),
-            KeyCode::Char('G') => self.move_to_bottom(),
-            KeyCode::Char('l') => self.show_detail = true,
-            KeyCode::Char('h') => self.show_detail = false,
-            KeyCode::Char('d') => {
-                if let Some(idx) = self.selected_session_index() {
-                    self.confirm_kill = Some(idx);
-                }
+        let code = key.code;
+        let keys = self.keys.clone();
+
+        if code == keys.quit || code == KeyCode::Esc {
+            self.running = false;
+        } else if code == keys.down || code == KeyCode::Down {
+            self.move_selection(1);
+        } else if code == keys.up || code == KeyCode::Up {
+            self.move_selection(-1);
+        } else if code == keys.top {
+            self.move_to_top();
+        } else if code == keys.bottom {
+            self.move_to_bottom();
+        } else if code == keys.detail_show {
+            self.show_detail = true;
+        } else if code == keys.detail_hide {
+            self.show_detail = false;
+        } else if code == keys.kill {
+            if let Some(idx) = self.selected_session_index() {
+                self.confirm_kill = Some(idx);
             }
-            KeyCode::Char('/') => {
-                self.search_mode = true;
-                self.search_query.clear();
-            }
-            KeyCode::Char('r') => self.refresh_sessions(),
-            KeyCode::Tab => self.cycle_grouping_mode(),
-            KeyCode::Char('i') => self.enter_passthrough(),
-            // Enter and 'n' handled in main.rs
-            KeyCode::Enter | KeyCode::Char('n') => {}
-            _ => {}
+        } else if code == keys.search {
+            self.search_mode = true;
+            self.search_query.clear();
+        } else if code == keys.refresh {
+            self.refresh_sessions();
+        } else if code == keys.cycle_group {
+            self.cycle_grouping_mode();
+        } else if code == keys.passthrough {
+            self.enter_passthrough();
+        } else if code == keys.attach || code == keys.new_session {
+            // Handled in main.rs
         }
     }
 
@@ -509,9 +510,4 @@ impl App {
             .map(|p| p.manifest().id)
     }
 
-    /// Inject a git root into the cache (for testing without subprocess).
-    #[cfg(test)]
-    pub fn set_git_root(&mut self, cwd: PathBuf, root: Option<String>) {
-        self.git_root_cache.insert(cwd, root);
-    }
 }

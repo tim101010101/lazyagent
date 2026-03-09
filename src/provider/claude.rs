@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use tracing::{debug, trace};
+
 use crate::protocol::{AgentStatus, ExecPlan, Provider, ProviderManifest};
 
 pub struct ClaudeProvider;
@@ -20,12 +22,20 @@ impl Provider for ClaudeProvider {
     }
 
     fn match_process(&self, process_name: &str) -> bool {
-        process_name == "claude" || process_name == "claude-code"
+        let matched = process_name == "claude" || process_name == "claude-code";
+        trace!(process_name, matched, "claude match_process");
+        matched
     }
 
     fn detect_status(&self, pane_output: &str) -> AgentStatus {
-        let lines: Vec<&str> = pane_output.lines().collect();
-        let tail: Vec<&str> = lines.iter().rev().take(20).copied().collect();
+        let lines: Vec<&str> = pane_output
+            .lines()
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .skip_while(|l| l.trim().is_empty())
+            .collect::<Vec<_>>();
+        let tail: Vec<&str> = lines.iter().take(20).copied().collect();
 
         // Scan bottom of pane for Claude Code UI patterns
         let mut has_prompt = false;
@@ -52,13 +62,16 @@ impl Provider for ClaudeProvider {
         }
 
         if has_thinking {
+            debug!("detect_status: Thinking");
             return AgentStatus::Thinking;
         }
 
         if has_prompt {
+            debug!("detect_status: Waiting");
             return AgentStatus::Waiting;
         }
 
+        debug!("detect_status: Unknown");
         AgentStatus::Unknown
     }
 
@@ -106,6 +119,20 @@ mod tests {
         // Tool output containing "error:" should NOT trigger Error status
         let output = "  error: nix eval failed\n\n✻ Worked for 1m\n\n────────── ▪▪▪ ─\n❯\u{a0}\n";
         assert_eq!(p.detect_status(output), AgentStatus::Waiting);
+    }
+
+    #[test]
+    fn test_detect_status_waiting_after_clear() {
+        let p = ClaudeProvider::new();
+        // After /clear: prompt near top, many trailing blank lines
+        let mut output = String::from(
+            "Claude Code v2.1.70\n\n❯ /clear\n  (no content)\n\n❯\u{a0}\n────────── ▪▪▪ ─\n  ⏵⏵ bypass permissions on\n",
+        );
+        // Simulate many trailing blank lines from capture-pane
+        for _ in 0..40 {
+            output.push('\n');
+        }
+        assert_eq!(p.detect_status(&output), AgentStatus::Waiting);
     }
 
     #[test]

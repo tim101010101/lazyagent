@@ -9,18 +9,18 @@ use crate::protocol::{AgentSession, AgentStatus, SessionSource};
 use crate::tui::sidebar::shorten_path;
 use crate::tui::theme::Theme;
 
-pub fn render(frame: &mut Frame, area: Rect, session: Option<&AgentSession>) {
+pub fn render(frame: &mut Frame, area: Rect, session: Option<&AgentSession>, theme: &Theme) {
     let block = Block::default()
         .title(" Detail ")
-        .title_style(Theme::title())
+        .title_style(theme.title)
         .borders(Borders::ALL)
-        .border_style(Theme::border_unfocused());
+        .border_style(theme.border_unfocused);
 
     let session = match session {
         Some(s) => s,
         None => {
             let msg = Paragraph::new("Select a session to view details")
-                .style(Theme::label())
+                .style(theme.label)
                 .block(block);
             frame.render_widget(msg, area);
             return;
@@ -73,7 +73,7 @@ pub fn render(frame: &mut Frame, area: Rect, session: Option<&AgentSession>) {
 
     let mut y = inner.y;
     // Title
-    let title_line = Line::from(Span::styled("Session Info", Theme::title()));
+    let title_line = Line::from(Span::styled("Session Info", theme.title));
     frame.render_widget(
         Paragraph::new(title_line),
         Rect::new(inner.x, y, inner.width, 1),
@@ -85,8 +85,8 @@ pub fn render(frame: &mut Frame, area: Rect, session: Option<&AgentSession>) {
             break;
         }
         let line = Line::from(vec![
-            Span::styled(format!(" {}: ", key), Theme::label()),
-            Span::styled(value.as_str(), Theme::value()),
+            Span::styled(format!(" {}: ", key), theme.label),
+            Span::styled(value.as_str(), theme.value),
         ]);
         frame.render_widget(
             Paragraph::new(line),

@@ -37,6 +37,8 @@ pub struct AgentSession {
     pub status: AgentStatus,
     pub started_at: Option<SystemTime>,
     pub source: SessionSource,
+    /// Pre-computed git root directory name (resolved in background worker).
+    pub git_root: Option<String>,
 }
 
 #[derive(Debug, Clone)]
