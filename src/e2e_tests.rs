@@ -88,13 +88,15 @@ fn key(code: KeyCode) -> KeyEvent {
 
 #[test]
 fn test_flat_mode_no_group_headers() {
-    let app = make_app(vec![
+    let mut app = make_app(vec![
         make_session("mock", "/code/proj-a/app", AgentStatus::Waiting, "la/mock/app", SessionSource::Local, 100),
         make_session("mock", "/code/proj-a/api", AgentStatus::Thinking, "la/mock/api", SessionSource::Local, 200),
         make_session("mock", "/code/proj-b/web", AgentStatus::Idle, "la/mock/web", SessionSource::Local, 300),
     ]);
 
-    // Default is flat — no group headers
+    app.grouping_mode = GroupingMode::Flat;
+    app.rebuild_sidebar();
+
     assert_eq!(app.grouping_mode, GroupingMode::Flat);
     let source_headers = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::SourceHeader(_))).count();
     let group_headers = app.sidebar_items.iter().filter(|i| matches!(i, SidebarItem::GroupHeader(_))).count();
@@ -180,6 +182,8 @@ fn test_mode_cycling_skips_custom_when_no_groups() {
     ]);
 
     // No custom groups — should skip custom
+    app.grouping_mode = GroupingMode::Flat;
+    app.rebuild_sidebar();
     assert_eq!(app.grouping_mode, GroupingMode::Flat);
     app.handle_key(key(KeyCode::Tab));
     assert_eq!(app.grouping_mode, GroupingMode::GitRoot);
@@ -196,6 +200,9 @@ fn test_mode_cycling_includes_custom_when_groups_exist() {
     app.custom_groups = vec![
         CustomGroup { name: "Work".into(), patterns: vec!["**/code/**".into()] },
     ];
+
+    app.grouping_mode = GroupingMode::Flat;
+    app.rebuild_sidebar();
 
     assert_eq!(app.grouping_mode, GroupingMode::Flat);
     app.handle_key(key(KeyCode::Tab));
@@ -318,6 +325,7 @@ fn test_status_icons_render() {
                 app.selected_index,
                 true,
                 &app.grouping_mode,
+                app.tick,
             );
         })
         .unwrap();
@@ -392,6 +400,7 @@ fn test_cjk_rendering_safety() {
                 app.selected_index,
                 true,
                 &app.grouping_mode,
+                app.tick,
             );
         })
         .unwrap();
@@ -471,6 +480,7 @@ fn test_render_narrow_terminal() {
                 app.selected_index,
                 true,
                 &app.grouping_mode,
+                app.tick,
             );
         })
         .unwrap();

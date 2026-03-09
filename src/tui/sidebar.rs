@@ -17,6 +17,7 @@ pub fn render(
     selected: usize,
     focused: bool,
     grouping_mode: &GroupingMode,
+    tick: u64,
 ) {
     let border_style = if focused {
         Theme::border_focused()
@@ -51,7 +52,7 @@ pub fn render(
             }
             SidebarItem::Session(idx) => {
                 if let Some(session) = sessions.get(*idx) {
-                    render_session_item(session, area.width)
+                    render_session_item(session, area.width, tick)
                 } else {
                     ListItem::new(Line::from(""))
                 }
@@ -69,8 +70,8 @@ pub fn render(
     frame.render_stateful_widget(list, area, &mut state);
 }
 
-fn render_session_item(session: &AgentSession, width: u16) -> ListItem<'static> {
-    let (icon, icon_style) = status_icon(&session.status);
+fn render_session_item(session: &AgentSession, width: u16, tick: u64) -> ListItem<'static> {
+    let (icon, icon_style) = status_icon(&session.status, tick);
 
     let time_str = session
         .started_at
@@ -100,10 +101,15 @@ fn render_session_item(session: &AgentSession, width: u16) -> ListItem<'static> 
     ]))
 }
 
-fn status_icon(status: &AgentStatus) -> (&'static str, ratatui::style::Style) {
+const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+
+fn status_icon(status: &AgentStatus, tick: u64) -> (&'static str, ratatui::style::Style) {
     match status {
         AgentStatus::Waiting | AgentStatus::Idle => ("●", Theme::status_active()),
-        AgentStatus::Thinking => ("◐", Theme::status_thinking()),
+        AgentStatus::Thinking => {
+            let frame = (tick as usize) % SPINNER_FRAMES.len();
+            (SPINNER_FRAMES[frame], Theme::status_thinking())
+        }
         AgentStatus::Error => ("✖", Theme::status_error()),
         AgentStatus::Unknown => ("?", Theme::status_unknown()),
     }

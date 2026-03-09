@@ -70,6 +70,7 @@ pub struct App {
     pub custom_groups: Vec<CustomGroup>,
     pub passthrough_mode: bool,
     pub last_esc_time: Option<Instant>,
+    pub tick: u64,
     git_root_cache: HashMap<PathBuf, Option<String>>,
     session_manager: SessionManager,
 }
@@ -89,10 +90,11 @@ impl App {
             pane_preview: None,
             preview_cache: HashMap::new(),
             pending_preview: None,
-            grouping_mode: GroupingMode::Flat,
+            grouping_mode: GroupingMode::GitRoot,
             custom_groups: Vec::new(),
             passthrough_mode: false,
             last_esc_time: None,
+            tick: 0,
             git_root_cache: HashMap::new(),
             session_manager,
         }
@@ -105,7 +107,7 @@ impl App {
         self.custom_groups = cfg.group;
         // If custom mode but no groups configured, fall back to flat
         if self.grouping_mode == GroupingMode::Custom && self.custom_groups.is_empty() {
-            self.grouping_mode = GroupingMode::Flat;
+            self.grouping_mode = GroupingMode::GitRoot;
         }
     }
 

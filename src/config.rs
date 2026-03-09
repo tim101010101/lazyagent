@@ -60,7 +60,7 @@ impl Config {
         match self.grouping_mode.as_deref() {
             Some("git") => GroupingMode::GitRoot,
             Some("custom") => GroupingMode::Custom,
-            _ => GroupingMode::Flat,
+            _ => GroupingMode::GitRoot,
         }
     }
 }

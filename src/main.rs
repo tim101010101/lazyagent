@@ -89,6 +89,7 @@ fn main() -> anyhow::Result<()> {
                 app.selected_index,
                 true,
                 &app.grouping_mode,
+                app.tick,
             );
 
             // Main area — pane preview
@@ -174,6 +175,7 @@ fn main() -> anyhow::Result<()> {
                 event::AppEvent::Tick => {
                     tick_counter += 1;
                     preview_counter += 1;
+                    app.tick += 1;
 
                     if tick_counter >= REFRESH_INTERVAL_TICKS {
                         tick_counter = 0;
