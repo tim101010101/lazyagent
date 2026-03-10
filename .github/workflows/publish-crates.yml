@@ -7,11 +7,16 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: read
+
 jobs:
   publish-crates:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
