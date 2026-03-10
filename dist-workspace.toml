@@ -17,6 +17,8 @@ install-path = "CARGO_HOME"
 install-updater = false
 # Publish jobs to run in CI
 publish-jobs = ["./publish-crates"]
+# Allow dirty working directory
+allow-dirty = ["ci"]
 
 [dist.github-custom-runners]
 aarch64-unknown-linux-gnu = "ubuntu-22.04"
