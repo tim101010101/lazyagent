@@ -11,6 +11,8 @@ A [lazygit](https://github.com/jesseduffield/lazygit)-style TUI for managing AI 
 
 You're running Claude Code in one tmux pane, Codex CLI in another, maybe a third agent working on tests — LazyAgent discovers them all, shows their live status, and lets you jump between them without losing your flow.
 
+![LazyAgent Main Interface](docs/screenshots/main.png)
+
 ## Why
 
 If you use AI coding agents seriously, you end up with multiple sessions scattered across tmux windows. Checking which one needs input, which one is thinking, which one errored out — it's tedious. LazyAgent solves this by giving you a single dashboard to monitor and manage all of them.
