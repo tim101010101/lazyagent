@@ -83,57 +83,9 @@ LazyAgent will scan all tmux panes for running agent processes and display them 
 | `?` | Help overlay |
 | `q` | Quit |
 
-## How It Works
+## Contributing
 
-LazyAgent polls tmux every 2 seconds:
-
-1. `tmux list-panes -a` to enumerate all panes
-2. Each pane's process tree is matched against registered providers
-3. Matched sessions get their status resolved via provider-specific strategies:
-   - **Claude Code**: reads JSONL session history + pane output text matching
-   - **Codex CLI**: queries SQLite state DB + pane output text matching
-4. Results are rendered in a ratatui-powered TUI
-
-Sessions you spawn through LazyAgent are named `la/<provider>/<dir>` for easy identification. Externally-started sessions are discovered and shown alongside them.
-
-## Adding a Provider
-
-Providers implement the `Provider` trait:
-
-```rust
-pub trait Provider: Send + Sync {
-    fn manifest(&self) -> ProviderManifest;
-    fn match_process(&self, cmdline: &str) -> bool;
-    fn exec_plan(&self, cwd: &str) -> ExecPlan;
-    fn resolvers(&self) -> Vec<Box<dyn StatusResolver>>;
-}
-```
-
-Drop your provider in `src/provider/`, register it in `src/provider/mod.rs`, and LazyAgent will pick it up.
-
-## Configuration
-
-```toml
-# ~/.config/lazyagent/config.toml
-
-[timing]
-refresh_interval_ms = 2000
-
-[layout]
-detail_panel = true
-
-[theme]
-# customize colors
-```
-
-## Logging
-
-Logs are written to `~/.local/state/lazyagent/`:
-
-- `lazyagent.log.YYYY-MM-DD` — all logs
-- `lazyagent-error.log.YYYY-MM-DD` — errors only
-
-Override log level with `LAZYAGENT_LOG=debug lazyagent`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for architecture details, how to add providers, configuration, and development setup.
 
 ## Roadmap
 
