@@ -148,6 +148,20 @@ impl ClaudeJsonlResolver {
         false
     }
 
+    /// Check if a user message is a local command record (not real conversation input).
+    fn is_local_command(v: &serde_json::Value) -> bool {
+        let content = v
+            .get("message")
+            .and_then(|m| m.get("content"))
+            .and_then(|c| c.as_str())
+            .unwrap_or("");
+        content.contains("<local-command-caveat>")
+            || content.contains("<bash-input>")
+            || content.contains("<bash-stdout>")
+            || content.contains("<bash-stderr>")
+            || content.contains("<command-name>")
+    }
+
     /// Analyze conversation history to determine status.
     /// Single reverse pass: tracks AskUserQuestion state + last meaningful event.
     fn parse_status_with_history(jsonl_path: &Path) -> Option<AgentStatus> {
@@ -174,9 +188,13 @@ impl ClaudeJsonlResolver {
                     last_result_idx = Some(i);
                 }
 
-                // First assistant/user line = last meaningful conversation event
-                if last_meaningful.is_none() && (msg_type == "assistant" || msg_type == "user") {
-                    last_meaningful = Self::parse_status(line);
+                // First meaningful conversation event (skip local command noise)
+                if last_meaningful.is_none() {
+                    if msg_type == "assistant" {
+                        last_meaningful = Self::parse_status(line);
+                    } else if msg_type == "user" && !Self::is_local_command(&v) {
+                        last_meaningful = Self::parse_status(line);
+                    }
                 }
 
                 if last_meaningful.is_some()
@@ -525,6 +543,45 @@ mod tests {
         writeln!(file, r#"{{"type":"user","message":{{"content":"hello"}}}}"#).unwrap();
         writeln!(file, r#"{{"type":"progress"}}"#).unwrap();
         writeln!(file, r#"{{"type":"progress"}}"#).unwrap();
+        drop(file);
+
+        let status = ClaudeJsonlResolver::parse_status_with_history(&jsonl_path);
+        assert_eq!(status, Some(AgentStatus::Thinking));
+
+        std::fs::remove_file(jsonl_path).ok();
+    }
+
+    #[test]
+    fn test_parse_status_with_history_local_command_user() {
+        // Reproduces .dotfiles bug: assistant end_turn → local command user lines
+        // Should return Waiting (skip local command noise), not Thinking
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let jsonl_path = temp_dir.join("test_local_cmd.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(file, r#"{{"type":"assistant","message":{{"stop_reason":"end_turn"}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"system","subtype":"local_command"}}"#).unwrap();
+        writeln!(file, r#"{{"type":"user","message":{{"content":"<local-command-caveat>Caveat</local-command-caveat>"}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"user","message":{{"content":"<bash-input>git push</bash-input>"}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"user","message":{{"content":"<bash-stdout>To github.com</bash-stdout>"}}}}"#).unwrap();
+        drop(file);
+
+        let status = ClaudeJsonlResolver::parse_status_with_history(&jsonl_path);
+        assert_eq!(status, Some(AgentStatus::Waiting));
+
+        std::fs::remove_file(jsonl_path).ok();
+    }
+
+    #[test]
+    fn test_parse_status_with_history_real_user_after_local_command() {
+        // Real user input after local commands → Thinking (AI should be processing)
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let jsonl_path = temp_dir.join("test_real_user_after_local.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(file, r#"{{"type":"assistant","message":{{"stop_reason":"end_turn"}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"user","message":{{"content":"<bash-input>git push</bash-input>"}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"user","message":{{"content":"fix the bug please"}}}}"#).unwrap();
         drop(file);
 
         let status = ClaudeJsonlResolver::parse_status_with_history(&jsonl_path);
