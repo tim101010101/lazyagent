@@ -35,6 +35,20 @@ If you use AI coding agents seriously, you end up with multiple sessions scatter
 
 ## Install
 
+### Shell (macOS / Linux)
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/tim101010101/lazyagent/releases/latest/download/lazyagent-installer.sh | sh
+```
+
+### Cargo
+
+```sh
+cargo install --git https://github.com/tim101010101/lazyagent
+```
+
+### Build from source
+
 ```sh
 git clone https://github.com/tim101010101/lazyagent.git
 cd lazyagent
