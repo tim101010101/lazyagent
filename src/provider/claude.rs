@@ -49,52 +49,32 @@ impl ClaudeJsonlResolver {
 
     /// Ambiguity-aware JSONL selection within a project dir.
     ///
-    /// - Exactly 1 file with mtime < 60s → return it (unambiguous active session)
-    /// - 0 files with mtime < 60s → return most recent overall (idle fallback)
-    /// - 2+ files with mtime < 60s → return None (ambiguous, let pane resolver handle it)
-    const ACTIVE_THRESHOLD_SECS: u64 = 60;
-
+    /// - Exactly 1 JSONL file exists → return it (unambiguous)
+    /// - 2+ JSONL files exist → return None (ambiguous, defer to pane resolver)
+    /// - 0 JSONL files → return None
+    ///
+    /// We don't use mtime because an idle session (Waiting) doesn't write to JSONL,
+    /// but a concurrent Thinking session does. Mtime-based filtering would incorrectly
+    /// pick the active file and cause both panes to read it.
     fn find_best_jsonl_in_dir(dir: &Path) -> Option<PathBuf> {
-        let now = SystemTime::now();
-        let mut all: Vec<(PathBuf, SystemTime)> = Vec::new();
+        let mut jsonl_files: Vec<PathBuf> = Vec::new();
 
         let entries = fs::read_dir(dir).ok()?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
-                if let Ok(meta) = path.metadata() {
-                    if let Ok(modified) = meta.modified() {
-                        all.push((path, modified));
-                    }
-                }
+                jsonl_files.push(path);
             }
         }
 
-        if all.is_empty() {
-            return None;
-        }
-
-        let active: Vec<&(PathBuf, SystemTime)> = all
-            .iter()
-            .filter(|(_, mtime)| {
-                now.duration_since(*mtime)
-                    .map_or(false, |d| d.as_secs() < Self::ACTIVE_THRESHOLD_SECS)
-            })
-            .collect();
-
-        match active.len() {
-            1 => Some(active[0].0.clone()),
-            0 => {
-                // All stale — pick most recent overall
-                all.iter()
-                    .max_by_key(|(_, t)| *t)
-                    .map(|(p, _)| p.clone())
-            }
-            _ => {
+        match jsonl_files.len() {
+            1 => Some(jsonl_files.into_iter().next().unwrap()),
+            0 => None,
+            n => {
                 debug!(
-                    count = active.len(),
+                    count = n,
                     dir = %dir.display(),
-                    "ambiguous: multiple active JSONL files, deferring to pane resolver"
+                    "ambiguous: multiple JSONL files, deferring to pane resolver"
                 );
                 None
             }
@@ -720,46 +700,9 @@ mod tests {
     }
 
     #[test]
-    fn test_find_session_jsonl_one_active_one_stale() {
-        use filetime::{set_file_mtime, FileTime};
-
+    fn test_find_session_jsonl_empty_dir_returns_none() {
         let dir = tempfile::tempdir().unwrap();
-        let active = dir.path().join("session-active.jsonl");
-        let stale = dir.path().join("session-stale.jsonl");
-        std::fs::write(&active, r#"{"type":"user"}"#).unwrap();
-        std::fs::write(&stale, r#"{"type":"user"}"#).unwrap();
-
-        // Set stale file mtime to 5 minutes ago
-        let five_min_ago = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs()
-            - 300;
-        set_file_mtime(&stale, FileTime::from_unix_time(five_min_ago as i64, 0)).unwrap();
-
         let result = ClaudeJsonlResolver::find_best_jsonl_in_dir(dir.path());
-        assert_eq!(result, Some(active));
-    }
-
-    #[test]
-    fn test_find_session_jsonl_all_stale_returns_most_recent() {
-        use filetime::{set_file_mtime, FileTime};
-
-        let dir = tempfile::tempdir().unwrap();
-        let older = dir.path().join("session-older.jsonl");
-        let newer = dir.path().join("session-newer.jsonl");
-        std::fs::write(&older, r#"{"type":"user"}"#).unwrap();
-        std::fs::write(&newer, r#"{"type":"user"}"#).unwrap();
-
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs();
-        // Both stale (>60s), but newer is more recent
-        set_file_mtime(&older, FileTime::from_unix_time((now_secs - 300) as i64, 0)).unwrap();
-        set_file_mtime(&newer, FileTime::from_unix_time((now_secs - 120) as i64, 0)).unwrap();
-
-        let result = ClaudeJsonlResolver::find_best_jsonl_in_dir(dir.path());
-        assert_eq!(result, Some(newer));
+        assert_eq!(result, None);
     }
 }
