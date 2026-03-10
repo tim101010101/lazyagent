@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{status::StatusResolver, AgentStatus, ExecPlan, ProviderManifest};
+use super::{status::StatusResolver, ExecPlan, ProviderManifest};
 
 pub trait Provider: Send + Sync {
     fn manifest(&self) -> ProviderManifest;

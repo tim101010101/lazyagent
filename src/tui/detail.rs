@@ -37,6 +37,7 @@ pub fn render(frame: &mut Frame, area: Rect, session: Option<&AgentSession>, the
     let status_str = match session.status {
         AgentStatus::Thinking => "thinking",
         AgentStatus::Waiting => "waiting",
+        AgentStatus::NeedsInput => "needs input",
         AgentStatus::Idle => "idle",
         AgentStatus::Error => "error",
         AgentStatus::Unknown => "unknown",

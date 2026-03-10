@@ -18,6 +18,7 @@ pub struct Theme {
     pub error: Style,
     pub status_thinking: Style,
     pub status_active: Style,
+    pub status_needs_input: Style,
     pub status_error: Style,
     pub status_unknown: Style,
     pub passthrough_border: Style,
@@ -65,6 +66,10 @@ impl Theme {
             error: cfg.get_style("error", Style::default().fg(Color::Red)),
             status_thinking: cfg.get_style("status_thinking", Style::default().fg(Color::Yellow)),
             status_active: cfg.get_style("status_active", Style::default().fg(Color::Green)),
+            status_needs_input: cfg.get_style(
+                "status_needs_input",
+                Style::default().fg(Color::LightMagenta),
+            ),
             status_error: cfg.get_style("status_error", Style::default().fg(Color::Red)),
             status_unknown: cfg.get_style("status_unknown", Style::default().fg(Color::DarkGray)),
             passthrough_border: cfg.get_style(
