@@ -148,7 +148,8 @@ impl ClaudeJsonlResolver {
         false
     }
 
-    /// Analyze conversation history to determine if waiting for user input.
+    /// Analyze conversation history to determine status.
+    /// Single reverse pass: tracks AskUserQuestion state + last meaningful event.
     fn parse_status_with_history(jsonl_path: &Path) -> Option<AgentStatus> {
         let content = fs::read_to_string(jsonl_path).ok()?;
         let lines: Vec<&str> = content.lines().filter(|l| !l.trim().is_empty()).collect();
@@ -160,28 +161,42 @@ impl ClaudeJsonlResolver {
         let scan_limit = 100.min(lines.len());
         let mut last_ask_idx: Option<usize> = None;
         let mut last_result_idx: Option<usize> = None;
+        let mut last_meaningful: Option<AgentStatus> = None;
 
         for (i, line) in lines.iter().enumerate().rev().take(scan_limit) {
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                let msg_type = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+
                 if last_ask_idx.is_none() && Self::is_ask_user_question(&v) {
                     last_ask_idx = Some(i);
                 }
                 if last_result_idx.is_none() && Self::is_tool_result(&v) {
                     last_result_idx = Some(i);
                 }
-                if last_ask_idx.is_some() && last_result_idx.is_some() {
+
+                // First assistant/user line = last meaningful conversation event
+                if last_meaningful.is_none() && (msg_type == "assistant" || msg_type == "user") {
+                    last_meaningful = Self::parse_status(line);
+                }
+
+                if last_meaningful.is_some()
+                    && (last_ask_idx.is_some() || last_result_idx.is_some())
+                {
                     break;
                 }
             }
         }
 
+        // NeedsInput takes priority
         match (last_ask_idx, last_result_idx) {
-            (Some(_), None) => Some(AgentStatus::NeedsInput),
+            (Some(_), None) => return Some(AgentStatus::NeedsInput),
             (Some(ask_idx), Some(result_idx)) if ask_idx > result_idx => {
-                Some(AgentStatus::NeedsInput)
+                return Some(AgentStatus::NeedsInput);
             }
-            _ => Self::parse_status(lines.last()?),
+            _ => {}
         }
+
+        last_meaningful
     }
 }
 
@@ -460,6 +475,60 @@ mod tests {
 
         let status = ClaudeJsonlResolver::parse_status_with_history(&jsonl_path);
         assert_eq!(status, None);
+
+        std::fs::remove_file(jsonl_path).ok();
+    }
+
+    #[test]
+    fn test_parse_status_with_history_trailing_system() {
+        // assistant end_turn + progress + system tail → should be Waiting
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let jsonl_path = temp_dir.join("test_trailing_system.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(file, r#"{{"type":"assistant","message":{{"stop_reason":"end_turn"}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"progress"}}"#).unwrap();
+        writeln!(file, r#"{{"type":"progress"}}"#).unwrap();
+        writeln!(file, r#"{{"type":"system","subtype":"stop_hook_summary"}}"#).unwrap();
+        drop(file);
+
+        let status = ClaudeJsonlResolver::parse_status_with_history(&jsonl_path);
+        assert_eq!(status, Some(AgentStatus::Waiting));
+
+        std::fs::remove_file(jsonl_path).ok();
+    }
+
+    #[test]
+    fn test_parse_status_with_history_only_noise() {
+        // Only progress/system lines → None (let pane resolver handle it)
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let jsonl_path = temp_dir.join("test_only_noise.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(file, r#"{{"type":"progress"}}"#).unwrap();
+        writeln!(file, r#"{{"type":"system","subtype":"init"}}"#).unwrap();
+        drop(file);
+
+        let status = ClaudeJsonlResolver::parse_status_with_history(&jsonl_path);
+        assert_eq!(status, None);
+
+        std::fs::remove_file(jsonl_path).ok();
+    }
+
+    #[test]
+    fn test_parse_status_with_history_trailing_progress_after_user() {
+        // user input + trailing progress → Thinking (user sent message, AI processing)
+        use std::io::Write;
+        let temp_dir = std::env::temp_dir();
+        let jsonl_path = temp_dir.join("test_trailing_progress_user.jsonl");
+        let mut file = std::fs::File::create(&jsonl_path).unwrap();
+        writeln!(file, r#"{{"type":"user","message":{{"content":"hello"}}}}"#).unwrap();
+        writeln!(file, r#"{{"type":"progress"}}"#).unwrap();
+        writeln!(file, r#"{{"type":"progress"}}"#).unwrap();
+        drop(file);
+
+        let status = ClaudeJsonlResolver::parse_status_with_history(&jsonl_path);
+        assert_eq!(status, Some(AgentStatus::Thinking));
 
         std::fs::remove_file(jsonl_path).ok();
     }
