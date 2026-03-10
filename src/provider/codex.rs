@@ -6,9 +6,35 @@ use std::sync::Mutex;
 use tracing::{debug, trace, warn};
 
 use crate::protocol::{
-    find_open_jsonl, AgentStatus, ExecPlan, Provider, ProviderManifest, ResolveContext,
-    StatusResolver,
+    AgentStatus, ExecPlan, Provider, ProviderManifest, ResolveContext, StatusResolver,
 };
+
+// ===== lsof-based JSONL discovery (Codex holds files open, unlike Claude) =====
+
+fn find_open_jsonl(pid: u32) -> Option<PathBuf> {
+    let output = Command::new("lsof")
+        .args(["-p", &pid.to_string(), "-Fn"])
+        .output()
+        .ok()?;
+
+    if !output.status.success() {
+        trace!(pid, "lsof failed or process gone");
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for line in stdout.lines() {
+        if let Some(path) = line.strip_prefix('n') {
+            if path.ends_with(".jsonl") {
+                trace!(pid, path, "found open jsonl via lsof");
+                return Some(PathBuf::from(path));
+            }
+        }
+    }
+
+    trace!(pid, "no open jsonl found via lsof");
+    None
+}
 
 // ===== Codex JSONL Resolver (lsof → SQLite fallback, with cache) =====
 
@@ -246,7 +272,7 @@ mod tests {
 
     #[test]
     fn test_resolver_uses_matched_pid() {
-        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, Some(48610));
+        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, Some(48610), vec![]);
         assert_eq!(ctx.matched_pid, Some(48610));
         let pid = ctx.matched_pid.unwrap_or(ctx.pane_pid);
         assert_eq!(pid, 48610);
@@ -254,7 +280,7 @@ mod tests {
 
     #[test]
     fn test_resolver_falls_back_to_pane_pid() {
-        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, None);
+        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, None, vec![]);
         let pid = ctx.matched_pid.unwrap_or(ctx.pane_pid);
         assert_eq!(pid, 1234);
     }
@@ -268,7 +294,7 @@ mod tests {
         let resolver = CodexJsonlResolver::new();
         resolver.cache.lock().unwrap().insert(42, path.clone());
 
-        let ctx = ResolveContext::new(1, "/tmp".into(), "%0".into(), None, Some(42));
+        let ctx = ResolveContext::new(1, "/tmp".into(), "%0".into(), None, Some(42), vec![]);
         let status = resolver.resolve(&ctx);
         assert_eq!(status, Some(AgentStatus::Waiting));
 
@@ -280,7 +306,7 @@ mod tests {
     }
 
     fn mock_pane_ctx(output: &str) -> ResolveContext {
-        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, None);
+        let ctx = ResolveContext::new(1234, "/tmp".into(), "%0".into(), None, None, vec![]);
         let _ = ctx.pane_output.set(output.to_string());
         ctx
     }

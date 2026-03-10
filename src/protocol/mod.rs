@@ -1,8 +1,9 @@
+pub mod binding;
 mod provider;
 pub mod status;
 
 pub use provider::Provider;
-pub use status::{find_open_jsonl, ResolveContext, StatusResolver};
+pub use status::{ResolveContext, StatusResolver};
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;

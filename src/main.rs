@@ -10,6 +10,7 @@ mod tmux;
 mod tui;
 
 use std::io::IsTerminal;
+use std::sync::Arc;
 use std::time::Instant;
 
 use ansi_to_tui::IntoText;
@@ -23,6 +24,7 @@ use tracing::{debug, error, info, warn};
 
 use app::App;
 use bg::BgRequest;
+use protocol::binding::SessionBindingStore;
 use provider::claude::ClaudeProvider;
 use provider::codex::CodexProvider;
 use session::SessionManager;
@@ -49,18 +51,21 @@ fn main() -> anyhow::Result<()> {
         default_panic(info);
     }));
 
+    // Shared binding store for deterministic JSONL → session mapping
+    let binding_store = Arc::new(SessionBindingStore::new());
+
     // Providers for main thread (attach/spawn)
     let providers: Vec<Box<dyn protocol::Provider>> = vec![
-        Box::new(ClaudeProvider::new()),
+        Box::new(ClaudeProvider::new(Arc::clone(&binding_store))),
         Box::new(CodexProvider::new()),
     ];
     let session_manager = SessionManager::new(providers);
     let mut app = App::new(session_manager);
     app.load_config();
 
-    // Background worker with its own provider instances
+    // Background worker with its own provider instances (shared binding store)
     let bg_providers: Vec<Box<dyn protocol::Provider>> = vec![
-        Box::new(ClaudeProvider::new()),
+        Box::new(ClaudeProvider::new(Arc::clone(&binding_store))),
         Box::new(CodexProvider::new()),
     ];
     let (bg_tx, bg_rx, bg_handle) = bg::spawn_worker(bg_providers);

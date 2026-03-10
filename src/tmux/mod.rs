@@ -10,6 +10,58 @@ use crate::protocol::{
     AgentSession, AgentStatus, ExecPlan, Provider, ResolveContext, SessionKind, SessionSource,
 };
 
+/// Parse macOS `lstart` format: "Day Mon DD HH:MM:SS YYYY" → epoch seconds.
+/// Example: "Mon Mar 10 14:30:00 2026"
+fn parse_lstart(tokens: &[&str]) -> Option<u64> {
+    if tokens.len() != 5 {
+        return None;
+    }
+    // tokens: [Day, Mon, DD, HH:MM:SS, YYYY]
+    let month = match tokens[1] {
+        "Jan" => 1,
+        "Feb" => 2,
+        "Mar" => 3,
+        "Apr" => 4,
+        "May" => 5,
+        "Jun" => 6,
+        "Jul" => 7,
+        "Aug" => 8,
+        "Sep" => 9,
+        "Oct" => 10,
+        "Nov" => 11,
+        "Dec" => 12,
+        _ => return None,
+    };
+    let day: u32 = tokens[2].parse().ok()?;
+    let year: i64 = tokens[4].parse().ok()?;
+    let hms: Vec<&str> = tokens[3].split(':').collect();
+    if hms.len() != 3 {
+        return None;
+    }
+    let hour: u32 = hms[0].parse().ok()?;
+    let min: u32 = hms[1].parse().ok()?;
+    let sec: u32 = hms[2].parse().ok()?;
+
+    // Convert to epoch using a simple calculation (no leap second precision needed)
+    fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+        let y = if m <= 2 { y - 1 } else { y };
+        let m = m as i64;
+        let d = d as i64;
+        let era = if y >= 0 { y } else { y - 399 } / 400;
+        let yoe = (y - era * 400) as u64;
+        let doy = (153 * (if m > 2 { m - 3 } else { m + 9 }) + 2) / 5 + d - 1;
+        let doe = yoe as i64 * 365 + yoe as i64 / 4 - yoe as i64 / 100 + doy;
+        era * 146097 + doe - 719468
+    }
+
+    let days = days_from_civil(year, month, day);
+    let epoch = days * 86400 + hour as i64 * 3600 + min as i64 * 60 + sec as i64;
+    if epoch < 0 {
+        return None;
+    }
+    Some(epoch as u64)
+}
+
 const SESSION_PREFIX: &str = "la/";
 
 pub struct TmuxController;
@@ -59,10 +111,13 @@ impl TmuxController {
             pane_id: String,
             pane_pid: u32,
             matched_pid: Option<u32>,
+            matched_start_epoch: Option<u64>,
             pane_path: String,
             session_created: String,
             provider_id: String,
             kind: SessionKind,
+            /// All descendant processes of the matched agent pid: (pid, comm).
+            process_descendants: Vec<(String, String)>,
         }
 
         let mut matched: Vec<MatchedPane> = Vec::new();
@@ -83,12 +138,19 @@ impl TmuxController {
             // Check if pane command directly matches a provider
             let mut matched_provider: Option<String> = None;
             let mut matched_pid: Option<u32> = None;
+            let mut matched_start_epoch: Option<u64> = None;
             for provider in providers {
                 trace!(pane_cmd, provider_id = %provider.manifest().id, "checking direct match");
                 if provider.match_process(pane_cmd) {
                     matched_provider = Some(provider.manifest().id);
                     // Direct match: the pane process IS the agent
                     matched_pid = pane_pid.parse().ok();
+                    // Look up start_epoch from process tree for this pid
+                    matched_start_epoch = proc_tree
+                        .values()
+                        .flatten()
+                        .find(|(pid, _, _)| pid == pane_pid)
+                        .and_then(|(_, _, epoch)| *epoch);
                     break;
                 }
             }
@@ -97,12 +159,13 @@ impl TmuxController {
             if matched_provider.is_none() {
                 let descendants = find_descendant_commands(pane_pid, &proc_tree);
                 trace!(pane_pid, descendant_count = descendants.len(), "checking descendants");
-                'outer: for (child_pid, child_cmd) in &descendants {
+                'outer: for (child_pid, child_cmd, child_epoch) in &descendants {
                     for provider in providers {
                         trace!(child_cmd, provider_id = %provider.manifest().id, "checking descendant");
                         if provider.match_process(child_cmd) {
                             matched_provider = Some(provider.manifest().id);
                             matched_pid = child_pid.parse().ok();
+                            matched_start_epoch = *child_epoch;
                             break 'outer;
                         }
                     }
@@ -120,15 +183,28 @@ impl TmuxController {
                 SessionKind::Discovered
             };
 
+            // Collect descendants of the matched agent pid for resolver context
+            let process_descendants: Vec<(String, String)> = matched_pid
+                .and_then(|pid| {
+                    let desc = find_descendant_commands(&pid.to_string(), &proc_tree);
+                    if desc.is_empty() { None } else { Some(desc) }
+                })
+                .unwrap_or_default()
+                .into_iter()
+                .map(|(pid, comm, _)| (pid, comm))
+                .collect();
+
             matched.push(MatchedPane {
                 session_name: session_name.to_string(),
                 pane_id: pane_id.to_string(),
                 pane_pid: pane_pid.parse().unwrap_or(0),
                 matched_pid,
+                matched_start_epoch,
                 pane_path: pane_path.to_string(),
                 session_created: session_created.to_string(),
                 provider_id,
                 kind,
+                process_descendants,
             });
         }
 
@@ -142,8 +218,9 @@ impl TmuxController {
                     m.pane_pid,
                     m.pane_path.clone(),
                     m.pane_id.clone(),
-                    m.session_created.parse().ok(),
+                    m.matched_start_epoch,
                     m.matched_pid,
+                    m.process_descendants.clone(),
                 );
                 let status = resolve_status(&ctx, providers, &m.provider_id);
                 let git_root = resolve_git_root(Path::new(&m.pane_path));
@@ -297,41 +374,48 @@ impl TmuxController {
     }
 }
 
+/// Process entry: (pid, comm, start_epoch).
+type ProcEntry = (String, String, Option<u64>);
+
 /// Build a process tree from a single `ps -eo` call.
-/// Returns ppid → [(pid, comm)].
-fn build_process_tree() -> HashMap<String, Vec<(String, String)>> {
+/// Returns ppid → [(pid, comm, start_epoch)].
+/// Field order: pid, ppid, lstart (5 tokens: Day Mon DD HH:MM:SS YYYY), comm.
+fn build_process_tree() -> HashMap<String, Vec<ProcEntry>> {
     let output = match Command::new("ps")
-        .args(["-eo", "pid=,ppid=,comm="])
+        .args(["-eo", "pid=,ppid=,lstart=,comm="])
         .output()
     {
         Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).into_owned(),
         _ => return HashMap::new(),
     };
 
-    let mut tree: HashMap<String, Vec<(String, String)>> = HashMap::new();
+    let mut tree: HashMap<String, Vec<ProcEntry>> = HashMap::new();
     for line in output.lines() {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.len() >= 3 {
-            let pid = parts[0].to_string();
-            let ppid = parts[1].to_string();
-            let comm = parts[2..].join(" ");
-            tree.entry(ppid).or_default().push((pid, comm));
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        // Minimum: pid + ppid + 5 lstart tokens + 1 comm = 8
+        if tokens.len() < 8 {
+            continue;
         }
+        let pid = tokens[0].to_string();
+        let ppid = tokens[1].to_string();
+        let start_epoch = parse_lstart(&tokens[2..7]);
+        let comm = tokens[7..].join(" ");
+        tree.entry(ppid).or_default().push((pid, comm, start_epoch));
     }
     debug!(proc_tree_size = tree.len(), "process tree built");
     tree
 }
 
 /// Walk the process tree in-memory (BFS) to find descendant processes.
-/// Returns Vec<(pid, comm)> for each descendant.
-fn find_descendant_commands(pid: &str, tree: &HashMap<String, Vec<(String, String)>>) -> Vec<(String, String)> {
+/// Returns Vec<(pid, comm, start_epoch)> for each descendant.
+fn find_descendant_commands(pid: &str, tree: &HashMap<String, Vec<ProcEntry>>) -> Vec<ProcEntry> {
     let mut result = Vec::new();
     let mut queue = vec![pid.to_string()];
 
     while let Some(current) = queue.pop() {
         if let Some(children) = tree.get(&current) {
-            for (child_pid, comm) in children {
-                result.push((child_pid.clone(), comm.clone()));
+            for (child_pid, comm, start_epoch) in children {
+                result.push((child_pid.clone(), comm.clone(), *start_epoch));
                 queue.push(child_pid.clone());
             }
         }

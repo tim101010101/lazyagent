@@ -65,18 +65,102 @@ Design doc (AC-7/AC-8) specifies remote tmux discovery and management. Users wor
 ## Session Metrics Tracking
 
 - **Status**: 🔴 Pending
-- **Priority**: 🟢 Low
+- **Priority**: 🟡 Medium
 - **Created**: 2026-03-09
 - **Tags**: feature, metrics, analytics
 
 ### Background
 
-Users managing long-running agent sessions would benefit from visibility into session duration, resource usage, and cost. Helps with budgeting and identifying inefficient workflows.
+Users managing long-running agent sessions need visibility into token consumption and cost. Provider JSONL files already contain usage data — parsing them gives us cost tracking for free.
 
 ### Action Items
 
 - [ ] Track session uptime (already have `started_at`, compute duration on render)
-- [ ] Add optional token usage tracking if provider exposes API (Claude API usage endpoint)
-- [ ] Estimate cost based on token usage and provider pricing
-- [ ] Display metrics in detail panel
+- [ ] Parse provider JSONL files for token usage (Claude: `~/.claude/projects/` JSONL, Codex: rollout JSONL)
+- [ ] Estimate cost based on token usage and provider pricing (configurable rates)
+- [ ] Display cumulative tokens / estimated cost in detail panel
 - [ ] Consider persisting metrics to disk for historical analysis
+
+---
+
+## Multi-select Batch Operations
+
+- **Status**: 🔴 Pending
+- **Priority**: 🟡 Medium
+- **Created**: 2026-03-10
+- **Tags**: feature, ux
+
+### Background
+
+Managing 10+ stale sessions one-by-one is painful. Multi-select with batch kill/restart significantly improves session cleanup workflow.
+
+### Action Items
+
+- [ ] Add `Space` keybinding to toggle selection on current session
+- [ ] Visual indicator (checkbox/highlight) for selected sessions in sidebar
+- [ ] `D` (shift-d) to batch kill all selected sessions (with confirmation)
+- [ ] Clear selection on action completion or `Esc`
+- [ ] Consider batch restart for selected sessions
+
+---
+
+## Additional Provider Support
+
+- **Status**: 🔴 Pending
+- **Priority**: 🟡 Medium
+- **Created**: 2026-03-10
+- **Tags**: feature, providers
+
+### Background
+
+Only Claude and Codex are supported. Other CLI-based AI agents (Aider, Goose, etc.) have growing user bases. The provider trait is already designed for extensibility — adding new providers is low-cost.
+
+### Action Items
+
+- [ ] Implement AiderProvider (`src/provider/aider.rs`) — process matching + status detection
+- [ ] Implement GooseProvider (`src/provider/goose.rs`)
+- [ ] Survey other CLI agents with tmux-compatible workflows
+- [ ] Document provider authoring guide for community contributions
+- [ ] Consider dynamic provider loading via config
+
+---
+
+## Session Sorting
+
+- **Status**: 🔴 Pending
+- **Priority**: 🔴 High
+- **Created**: 2026-03-10
+- **Tags**: feature, ux
+
+### Background
+
+Currently sessions are grouped but not sorted within groups. Sorting by status (NeedsInput pinned to top), last activity, or name helps users quickly find sessions that need attention. NeedsInput-first sorting is the highest-value improvement here.
+
+### Action Items
+
+- [ ] Add sort mode cycling via keybinding (e.g. `s`)
+- [ ] Sort options: by status priority (NeedsInput > Error > Thinking > Waiting > Idle > Unknown), by name, by last activity
+- [ ] Default sort: status priority (NeedsInput always on top)
+- [ ] Persist sort preference in config
+- [ ] Display current sort mode in help bar
+
+---
+
+## Keybinding Modifier Support
+
+- **Status**: 🔴 Pending
+- **Priority**: 🟢 Low
+- **Created**: 2026-03-10
+- **Tags**: feature, ux, keybindings
+
+### Background
+
+Current keybinding system only supports single-character keys. As features grow, key space becomes limited. Supporting Ctrl/Alt modifiers expands available bindings and aligns with terminal app conventions.
+
+### Action Items
+
+- [ ] Extend keybinding parser to handle `C-x` (Ctrl) and `A-x` (Alt) notation
+- [ ] Update crossterm event matching to support modifier keys
+- [ ] Migrate config format to support modifier syntax in `config.toml`
+- [ ] Add default modifier bindings for new features (keep existing single-char bindings stable)
+- [ ] Update help overlay to display modifier key combos
