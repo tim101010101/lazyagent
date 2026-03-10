@@ -12,9 +12,6 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v6
-        with:
-          persist-credentials: false
-          submodules: recursive
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
       - name: Publish to crates.io
