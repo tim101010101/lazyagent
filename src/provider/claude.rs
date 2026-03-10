@@ -33,8 +33,7 @@ impl ClaudeJsonlResolver {
     }
 
     /// Find the best JSONL file for a given cwd.
-    /// Picks the most recently modified .jsonl — safe because caller already
-    /// confirmed the agent process is running.
+    /// Delegates to `find_best_jsonl_in_dir` after resolving the project dir.
     fn find_session_jsonl(cwd: &str) -> Option<PathBuf> {
         let home = dirs::home_dir()?;
         let encoded = Self::encode_cwd(cwd);
@@ -45,23 +44,61 @@ impl ClaudeJsonlResolver {
             return None;
         }
 
-        let mut best: Option<(PathBuf, SystemTime)> = None;
+        Self::find_best_jsonl_in_dir(&project_dir)
+    }
 
-        let entries = fs::read_dir(&project_dir).ok()?;
+    /// Ambiguity-aware JSONL selection within a project dir.
+    ///
+    /// - Exactly 1 file with mtime < 60s → return it (unambiguous active session)
+    /// - 0 files with mtime < 60s → return most recent overall (idle fallback)
+    /// - 2+ files with mtime < 60s → return None (ambiguous, let pane resolver handle it)
+    const ACTIVE_THRESHOLD_SECS: u64 = 60;
+
+    fn find_best_jsonl_in_dir(dir: &Path) -> Option<PathBuf> {
+        let now = SystemTime::now();
+        let mut all: Vec<(PathBuf, SystemTime)> = Vec::new();
+
+        let entries = fs::read_dir(dir).ok()?;
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) == Some("jsonl") {
                 if let Ok(meta) = path.metadata() {
                     if let Ok(modified) = meta.modified() {
-                        if best.as_ref().map_or(true, |(_, t)| modified > *t) {
-                            best = Some((path, modified));
-                        }
+                        all.push((path, modified));
                     }
                 }
             }
         }
 
-        best.map(|(p, _)| p)
+        if all.is_empty() {
+            return None;
+        }
+
+        let active: Vec<&(PathBuf, SystemTime)> = all
+            .iter()
+            .filter(|(_, mtime)| {
+                now.duration_since(*mtime)
+                    .map_or(false, |d| d.as_secs() < Self::ACTIVE_THRESHOLD_SECS)
+            })
+            .collect();
+
+        match active.len() {
+            1 => Some(active[0].0.clone()),
+            0 => {
+                // All stale — pick most recent overall
+                all.iter()
+                    .max_by_key(|(_, t)| *t)
+                    .map(|(p, _)| p.clone())
+            }
+            _ => {
+                debug!(
+                    count = active.len(),
+                    dir = %dir.display(),
+                    "ambiguous: multiple active JSONL files, deferring to pane resolver"
+                );
+                None
+            }
+        }
     }
 
     /// Tool names that indicate human-in-the-loop interaction.
@@ -658,5 +695,71 @@ mod tests {
         let r = ClaudePaneResolver;
         let ctx = mock_pane_ctx("random output");
         assert_eq!(r.resolve(&ctx), None);
+    }
+
+    #[test]
+    fn test_find_session_jsonl_single_returns_some() {
+        let dir = tempfile::tempdir().unwrap();
+        let jsonl = dir.path().join("session-abc.jsonl");
+        std::fs::write(&jsonl, r#"{"type":"user"}"#).unwrap();
+
+        let result = ClaudeJsonlResolver::find_best_jsonl_in_dir(dir.path());
+        assert_eq!(result, Some(jsonl));
+    }
+
+    #[test]
+    fn test_find_session_jsonl_ambiguous_returns_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("session-a.jsonl");
+        let b = dir.path().join("session-b.jsonl");
+        std::fs::write(&a, r#"{"type":"user"}"#).unwrap();
+        std::fs::write(&b, r#"{"type":"user"}"#).unwrap();
+
+        let result = ClaudeJsonlResolver::find_best_jsonl_in_dir(dir.path());
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn test_find_session_jsonl_one_active_one_stale() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let dir = tempfile::tempdir().unwrap();
+        let active = dir.path().join("session-active.jsonl");
+        let stale = dir.path().join("session-stale.jsonl");
+        std::fs::write(&active, r#"{"type":"user"}"#).unwrap();
+        std::fs::write(&stale, r#"{"type":"user"}"#).unwrap();
+
+        // Set stale file mtime to 5 minutes ago
+        let five_min_ago = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            - 300;
+        set_file_mtime(&stale, FileTime::from_unix_time(five_min_ago as i64, 0)).unwrap();
+
+        let result = ClaudeJsonlResolver::find_best_jsonl_in_dir(dir.path());
+        assert_eq!(result, Some(active));
+    }
+
+    #[test]
+    fn test_find_session_jsonl_all_stale_returns_most_recent() {
+        use filetime::{set_file_mtime, FileTime};
+
+        let dir = tempfile::tempdir().unwrap();
+        let older = dir.path().join("session-older.jsonl");
+        let newer = dir.path().join("session-newer.jsonl");
+        std::fs::write(&older, r#"{"type":"user"}"#).unwrap();
+        std::fs::write(&newer, r#"{"type":"user"}"#).unwrap();
+
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        // Both stale (>60s), but newer is more recent
+        set_file_mtime(&older, FileTime::from_unix_time((now_secs - 300) as i64, 0)).unwrap();
+        set_file_mtime(&newer, FileTime::from_unix_time((now_secs - 120) as i64, 0)).unwrap();
+
+        let result = ClaudeJsonlResolver::find_best_jsonl_in_dir(dir.path());
+        assert_eq!(result, Some(newer));
     }
 }

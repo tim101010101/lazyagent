@@ -26,6 +26,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-appender = "0.2"
 uuid = { version = "1", features = ["v4"] }
 
+[dev-dependencies]
+filetime = "0.2"
+tempfile = "3"
+
 [profile.dist]
 inherits = "release"
 lto = "thin"
