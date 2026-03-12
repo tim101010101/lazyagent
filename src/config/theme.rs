@@ -4,6 +4,8 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ThemeConfig {
+    #[serde(default)]
+    pub preset: Option<String>,
     #[serde(flatten)]
     pub styles: HashMap<String, StyleDef>,
 }
@@ -76,12 +78,161 @@ pub fn parse_color(s: &str) -> Option<Color> {
     }
 }
 
+pub fn preset_styles(name: &str) -> HashMap<String, StyleDef> {
+    match name {
+        "nord" => nord(),
+        "catppuccin-mocha" => catppuccin_mocha(),
+        "gruvbox-dark" => gruvbox_dark(),
+        "tokyonight" => tokyonight(),
+        "ayu-dark" => ayu_dark(),
+        _ => HashMap::new(),
+    }
+}
+
+fn s(fg: &str) -> StyleDef {
+    StyleDef { fg: Some(fg.into()), bg: None, bold: false }
+}
+
+fn sb(fg: &str) -> StyleDef {
+    StyleDef { fg: Some(fg.into()), bg: None, bold: true }
+}
+
+fn sbg(fg: &str, bg: &str) -> StyleDef {
+    StyleDef { fg: Some(fg.into()), bg: Some(bg.into()), bold: true }
+}
+
+fn nord() -> HashMap<String, StyleDef> {
+    let mut m = HashMap::new();
+    m.insert("title".into(),             sb("#88C0D0"));
+    m.insert("border_focused".into(),    s("#88C0D0"));
+    m.insert("border_unfocused".into(),  s("#434C5E"));
+    m.insert("source_header".into(),     sb("#81A1C1"));
+    m.insert("project_header".into(),    sb("#EBCB8B"));
+    m.insert("status_thinking".into(),   s("#EBCB8B"));
+    m.insert("status_active".into(),     s("#A3BE8C"));
+    m.insert("status_needs_input".into(),s("#B48EAD"));
+    m.insert("status_error".into(),      s("#BF616A"));
+    m.insert("status_unknown".into(),    s("#4C566A"));
+    m.insert("error".into(),             s("#BF616A"));
+    m.insert("selected".into(),          sbg("#D8DEE9", "#3B4252"));
+    m.insert("selected_bar".into(),      s("#88C0D0"));
+    m.insert("normal".into(),            s("#D8DEE9"));
+    m.insert("key_action".into(),        s("#D8DEE9"));
+    m.insert("label".into(),             s("#4C566A"));
+    m.insert("key_hint".into(),          s("#4C566A"));
+    m.insert("value".into(),             s("#D8DEE9"));
+    m.insert("passthrough_border".into(),s("#B48EAD"));
+    m.insert("passthrough_indicator".into(), sb("#B48EAD"));
+    m
+}
+
+fn catppuccin_mocha() -> HashMap<String, StyleDef> {
+    let mut m = HashMap::new();
+    m.insert("title".into(),             sb("#89DCEB"));
+    m.insert("border_focused".into(),    s("#89DCEB"));
+    m.insert("border_unfocused".into(),  s("#45475A"));
+    m.insert("source_header".into(),     sb("#89B4FA"));
+    m.insert("project_header".into(),    sb("#F9E2AF"));
+    m.insert("status_thinking".into(),   s("#F9E2AF"));
+    m.insert("status_active".into(),     s("#A6E3A1"));
+    m.insert("status_needs_input".into(),s("#CBA6F7"));
+    m.insert("status_error".into(),      s("#F38BA8"));
+    m.insert("status_unknown".into(),    s("#6C7086"));
+    m.insert("error".into(),             s("#F38BA8"));
+    m.insert("selected".into(),          sbg("#CDD6F4", "#313244"));
+    m.insert("selected_bar".into(),      s("#89DCEB"));
+    m.insert("normal".into(),            s("#CDD6F4"));
+    m.insert("key_action".into(),        s("#CDD6F4"));
+    m.insert("label".into(),             s("#6C7086"));
+    m.insert("key_hint".into(),          s("#6C7086"));
+    m.insert("value".into(),             s("#CDD6F4"));
+    m.insert("passthrough_border".into(),s("#CBA6F7"));
+    m.insert("passthrough_indicator".into(), sb("#CBA6F7"));
+    m
+}
+
+fn gruvbox_dark() -> HashMap<String, StyleDef> {
+    let mut m = HashMap::new();
+    m.insert("title".into(),             sb("#83A598"));
+    m.insert("border_focused".into(),    s("#83A598"));
+    m.insert("border_unfocused".into(),  s("#504945"));
+    m.insert("source_header".into(),     sb("#458588"));
+    m.insert("project_header".into(),    sb("#D79921"));
+    m.insert("status_thinking".into(),   s("#D79921"));
+    m.insert("status_active".into(),     s("#98971A"));
+    m.insert("status_needs_input".into(),s("#B16286"));
+    m.insert("status_error".into(),      s("#CC241D"));
+    m.insert("status_unknown".into(),    s("#928374"));
+    m.insert("error".into(),             s("#CC241D"));
+    m.insert("selected".into(),          sbg("#EBDBB2", "#3C3836"));
+    m.insert("selected_bar".into(),      s("#83A598"));
+    m.insert("normal".into(),            s("#EBDBB2"));
+    m.insert("key_action".into(),        s("#EBDBB2"));
+    m.insert("label".into(),             s("#928374"));
+    m.insert("key_hint".into(),          s("#928374"));
+    m.insert("value".into(),             s("#EBDBB2"));
+    m.insert("passthrough_border".into(),s("#B16286"));
+    m.insert("passthrough_indicator".into(), sb("#B16286"));
+    m
+}
+
+fn tokyonight() -> HashMap<String, StyleDef> {
+    let mut m = HashMap::new();
+    m.insert("title".into(),             sb("#7DCFFF"));
+    m.insert("border_focused".into(),    s("#7DCFFF"));
+    m.insert("border_unfocused".into(),  s("#3B4261"));
+    m.insert("source_header".into(),     sb("#7AA2F7"));
+    m.insert("project_header".into(),    sb("#E0AF68"));
+    m.insert("status_thinking".into(),   s("#E0AF68"));
+    m.insert("status_active".into(),     s("#9ECE6A"));
+    m.insert("status_needs_input".into(),s("#BB9AF7"));
+    m.insert("status_error".into(),      s("#F7768E"));
+    m.insert("status_unknown".into(),    s("#565F89"));
+    m.insert("error".into(),             s("#F7768E"));
+    m.insert("selected".into(),          sbg("#C0CAF5", "#283457"));
+    m.insert("selected_bar".into(),      s("#7DCFFF"));
+    m.insert("normal".into(),            s("#C0CAF5"));
+    m.insert("key_action".into(),        s("#C0CAF5"));
+    m.insert("label".into(),             s("#565F89"));
+    m.insert("key_hint".into(),          s("#565F89"));
+    m.insert("value".into(),             s("#C0CAF5"));
+    m.insert("passthrough_border".into(),s("#BB9AF7"));
+    m.insert("passthrough_indicator".into(), sb("#BB9AF7"));
+    m
+}
+
+fn ayu_dark() -> HashMap<String, StyleDef> {
+    let mut m = HashMap::new();
+    m.insert("title".into(),             sb("#39BAE6"));
+    m.insert("border_focused".into(),    s("#39BAE6"));
+    m.insert("border_unfocused".into(),  s("#2D3640"));
+    m.insert("source_header".into(),     sb("#59C2FF"));
+    m.insert("project_header".into(),    sb("#FFB454"));
+    m.insert("status_thinking".into(),   s("#FFB454"));
+    m.insert("status_active".into(),     s("#7FD962"));
+    m.insert("status_needs_input".into(),s("#D2A6FF"));
+    m.insert("status_error".into(),      s("#FF3333"));
+    m.insert("status_unknown".into(),    s("#5C6773"));
+    m.insert("error".into(),             s("#FF3333"));
+    m.insert("selected".into(),          sbg("#BFBDB6", "#273747"));
+    m.insert("selected_bar".into(),      s("#39BAE6"));
+    m.insert("normal".into(),            s("#BFBDB6"));
+    m.insert("key_action".into(),        s("#BFBDB6"));
+    m.insert("label".into(),             s("#5C6773"));
+    m.insert("key_hint".into(),          s("#5C6773"));
+    m.insert("value".into(),             s("#BFBDB6"));
+    m.insert("passthrough_border".into(),s("#D2A6FF"));
+    m.insert("passthrough_indicator".into(), sb("#D2A6FF"));
+    m
+}
+
 impl ThemeConfig {
     pub fn get_style(&self, key: &str, default: Style) -> Style {
-        match self.styles.get(key) {
-            Some(def) => def.to_style(),
-            None => default,
-        }
+        let mut merged = self.preset.as_deref()
+            .map(preset_styles)
+            .unwrap_or_default();
+        merged.extend(self.styles.clone());
+        merged.get(key).map(|d| d.to_style()).unwrap_or(default)
     }
 }
 
@@ -241,5 +392,58 @@ fg = "#ff8800"
         // Unoverridden: still defaults
         assert_eq!(theme.selected.bg, Some(Color::DarkGray));
         assert_eq!(theme.normal.fg, Some(Color::Gray));
+    }
+
+    #[test]
+    fn test_preset_nord_loads() {
+        let toml_str = r#"
+preset = "nord"
+"#;
+        let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
+        let theme = crate::tui::theme::Theme::from_config(&cfg);
+        assert_eq!(theme.title.fg, Some(Color::Rgb(136, 192, 208))); // #88C0D0
+        assert_eq!(theme.border_focused.fg, Some(Color::Rgb(136, 192, 208)));
+        assert_eq!(theme.status_active.fg, Some(Color::Rgb(163, 190, 140))); // #A3BE8C
+    }
+
+    #[test]
+    fn test_preset_override() {
+        let toml_str = r##"
+preset = "nord"
+
+[title]
+fg = "#ff0000"
+"##;
+        let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
+        let theme = crate::tui::theme::Theme::from_config(&cfg);
+        // Override wins
+        assert_eq!(theme.title.fg, Some(Color::Rgb(255, 0, 0)));
+        // Preset base still applies to other slots
+        assert_eq!(theme.border_focused.fg, Some(Color::Rgb(136, 192, 208)));
+    }
+
+    #[test]
+    fn test_unknown_preset_falls_back() {
+        let toml_str = r#"
+preset = "nonexistent"
+"#;
+        let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
+        let theme = crate::tui::theme::Theme::from_config(&cfg);
+        // Should fall back to hardcoded defaults
+        assert_eq!(theme.title.fg, Some(Color::Cyan));
+        assert_eq!(theme.selected.bg, Some(Color::DarkGray));
+    }
+
+    #[test]
+    fn test_backward_compat() {
+        let toml_str = r#"
+[title]
+fg = "red"
+"#;
+        let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
+        let theme = crate::tui::theme::Theme::from_config(&cfg);
+        // No preset field → same as today
+        assert_eq!(theme.title.fg, Some(Color::Red));
+        assert_eq!(theme.selected.bg, Some(Color::DarkGray));
     }
 }

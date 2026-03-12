@@ -2,10 +2,11 @@ use ratatui::style::{Color, Modifier, Style};
 
 use crate::config::ThemeConfig;
 
-/// Theme with 18 style slots, constructed from config or defaults.
+/// Theme with 19 style slots, constructed from config or defaults.
 pub struct Theme {
     pub title: Style,
     pub selected: Style,
+    pub selected_bar: Style,
     pub normal: Style,
     pub source_header: Style,
     pub project_header: Style,
@@ -41,6 +42,7 @@ impl Theme {
                     .fg(Color::White)
                     .add_modifier(Modifier::BOLD),
             ),
+            selected_bar: cfg.get_style("selected_bar", Style::default().fg(Color::Cyan)),
             normal: cfg.get_style("normal", Style::default().fg(Color::Gray)),
             source_header: cfg.get_style(
                 "source_header",
