@@ -20,7 +20,9 @@ pub enum AgentStatus {
     Thinking,
     Waiting,
     NeedsInput,
+    #[allow(dead_code)]
     Idle,
+    #[allow(dead_code)]
     Error,
     Unknown,
 }
@@ -28,11 +30,13 @@ pub enum AgentStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionSource {
     Local,
+    #[allow(dead_code)]
     Remote { host: String },
 }
 
 #[derive(Debug, Clone)]
 pub struct AgentSession {
+    #[allow(dead_code)]
     pub kind: SessionKind,
     pub tmux_session: String,
     pub tmux_pane: String,
@@ -56,5 +60,6 @@ pub struct ExecPlan {
 #[derive(Debug, Clone)]
 pub struct ProviderManifest {
     pub id: String,
+    #[allow(dead_code)]
     pub name: String,
 }

@@ -168,12 +168,10 @@ fn parse_status_with_history(jsonl_path: &Path) -> Option<AgentStatus> {
             }
 
             // First meaningful conversation event (skip local command noise)
-            if last_meaningful.is_none() {
-                if msg_type == "assistant" {
-                    last_meaningful = parse_status(line);
-                } else if msg_type == "user" && !is_local_command(&v) {
-                    last_meaningful = parse_status(line);
-                }
+            if last_meaningful.is_none()
+                && (msg_type == "assistant" || (msg_type == "user" && !is_local_command(&v)))
+            {
+                last_meaningful = parse_status(line);
             }
 
             if last_meaningful.is_some()
@@ -304,7 +302,7 @@ impl StatusResolver for JsonlDiscoveryResolver {
                     .filter(|p| {
                         file_birthtime_epoch(p)
                             .map(|bt| {
-                                let delta = if bt > start { bt - start } else { start - bt };
+                                let delta = bt.abs_diff(start);
                                 delta <= BIRTHTIME_TOLERANCE_SECS
                             })
                             .unwrap_or(false)
@@ -340,9 +338,7 @@ struct CaffeinateResolver;
 
 impl StatusResolver for CaffeinateResolver {
     fn resolve(&self, ctx: &ResolveContext) -> Option<AgentStatus> {
-        if ctx.matched_pid.is_none() {
-            return None;
-        }
+        ctx.matched_pid?;
 
         let has_caffeinate = ctx
             .process_descendants

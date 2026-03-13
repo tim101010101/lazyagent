@@ -41,6 +41,7 @@ impl SessionBindingStore {
     }
 
     /// Evict bindings whose matched_pid no longer exists in the live process set.
+    #[allow(dead_code)]
     pub fn evict_dead(&self, live_pids: &HashSet<u32>) {
         if let Ok(mut map) = self.bindings.lock() {
             map.retain(|k, _| live_pids.contains(&k.matched_pid));

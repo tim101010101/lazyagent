@@ -67,6 +67,7 @@ const SESSION_PREFIX: &str = "la/";
 pub struct TmuxController;
 
 impl TmuxController {
+    #[allow(dead_code)]
     pub fn detect() -> bool {
         std::env::var("TMUX").is_ok()
     }

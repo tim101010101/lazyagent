@@ -7,6 +7,7 @@ use ratatui::{
 
 use crate::tui::theme::Theme;
 
+#[allow(dead_code)]
 pub fn render(frame: &mut Frame, area: Rect, theme: &Theme) {
     let version = env!("CARGO_PKG_VERSION");
     let text = format!("LazyAgent v{} ", version);

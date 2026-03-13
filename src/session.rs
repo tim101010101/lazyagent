@@ -29,6 +29,7 @@ impl SessionManager {
         }
     }
 
+    #[cfg(test)]
     pub fn poll(&self) -> Vec<AgentSession> {
         #[cfg(test)]
         if let Some(ref sessions) = self.mock_sessions {

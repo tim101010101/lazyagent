@@ -26,6 +26,7 @@ impl GroupingMode {
         }
     }
 
+    #[cfg(test)]
     pub fn label(&self) -> &'static str {
         self.as_str()
     }
@@ -338,6 +339,7 @@ impl App {
     }
 
     /// Legacy: poll sessions via SessionManager (used in tests).
+    #[cfg(test)]
     pub fn refresh_sessions(&mut self) {
         let sessions = self.session_manager.poll();
         self.update_sessions(sessions);
@@ -381,6 +383,7 @@ impl App {
         }
     }
 
+    #[cfg(test)]
     pub fn selected_session_index(&self) -> Option<usize> {
         match self.sidebar_items.get(self.selected_index) {
             Some(SidebarItem::Session(idx)) => Some(*idx),

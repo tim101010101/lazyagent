@@ -3,6 +3,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use crate::config::LayoutConfig;
 
 pub struct AppLayout {
+    #[allow(dead_code)]
     pub header: Rect,
     pub sidebar: Rect,
     pub main: Rect,
