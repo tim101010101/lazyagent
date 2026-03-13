@@ -1,5 +1,4 @@
 use ratatui::{
-    style::Color,
     layout::Rect,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, List, ListItem, ListState},
@@ -39,7 +38,6 @@ pub fn render(
 
     let inner = block.inner(area);
 
-    let mut session_row_idx: usize = 0;
     let list_items: Vec<ListItem> = items
         .iter()
         .enumerate()
@@ -65,14 +63,8 @@ pub fn render(
             }
             SidebarItem::Session(idx) => {
                 let is_selected = item_idx == selected;
-                let row_idx = session_row_idx;
-                session_row_idx += 1;
                 if let Some(session) = sessions.get(*idx) {
-                    let mut item = render_session_item(session, area.width, tick, theme, is_selected);
-                    if row_idx % 2 == 0 {
-                        item = item.style(ratatui::style::Style::default().bg(Color::Rgb(46, 52, 64)));
-                    }
-                    item
+                    render_session_item(session, area.width, tick, theme, is_selected)
                 } else {
                     ListItem::new(Line::from(""))
                 }
