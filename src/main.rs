@@ -18,7 +18,7 @@ use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::{
     layout::Rect,
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Paragraph},
+    widgets::{Block, BorderType, Borders, Paragraph},
 };
 use tracing::{debug, error, info, warn};
 
@@ -101,7 +101,6 @@ fn main() -> anyhow::Result<()> {
                 &app.sessions,
                 app.selected_index,
                 true,
-                &app.grouping_mode,
                 app.tick,
                 &app.theme,
                 &app.sidebar_config,
@@ -325,10 +324,10 @@ fn send_key_to_tmux(key: crossterm::event::KeyEvent, pane_id: &str) {
 }
 
 fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
-    let base_title = app
-        .selected_session()
-        .map(|s| format!(" {} — {} ", s.provider, s.cwd.display()))
-        .unwrap_or_else(|| " LazyAgent ".into());
+    let base_title = app.selected_session().map(|s| {
+        let cwd_short = tui::sidebar::shorten_path(&s.cwd.to_string_lossy());
+        format!(" {} │ {} ", s.provider, cwd_short)
+    }).unwrap_or_else(|| " LazyAgent ".into());
 
     let title = if app.passthrough_mode {
         format!(" PASSTHROUGH | {}", base_title.trim())
@@ -346,6 +345,7 @@ fn render_main(frame: &mut ratatui::Frame, area: Rect, app: &App) {
         .title(title)
         .title_style(app.theme.title)
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style);
 
     if let Some(ref preview) = app.pane_preview {

@@ -368,11 +368,11 @@ bold = false
     fn test_theme_from_config_empty() {
         let cfg = ThemeConfig::default();
         let theme = crate::tui::theme::Theme::from_config(&cfg);
-        // Should match hardcoded defaults
-        assert_eq!(theme.title.fg, Some(Color::Cyan));
-        assert_eq!(theme.selected.bg, Some(Color::DarkGray));
-        assert_eq!(theme.error.fg, Some(Color::Red));
-        assert_eq!(theme.status_thinking.fg, Some(Color::Yellow));
+        // Should match hardcoded Nord defaults
+        assert_eq!(theme.title.fg, Some(Color::Rgb(136, 192, 208)));
+        assert_eq!(theme.selected.bg, Some(Color::Rgb(59, 66, 82)));
+        assert_eq!(theme.error.fg, Some(Color::Rgb(191, 97, 106)));
+        assert_eq!(theme.status_thinking.fg, Some(Color::Rgb(235, 203, 139)));
     }
 
     #[test]
@@ -390,7 +390,7 @@ fg = "#ff8800"
         assert_eq!(theme.title.fg, Some(Color::Green));
         assert_eq!(theme.error.fg, Some(Color::Rgb(255, 136, 0)));
         // Unoverridden: still defaults
-        assert_eq!(theme.selected.bg, Some(Color::DarkGray));
+        assert_eq!(theme.selected.bg, Some(Color::Rgb(59, 66, 82)));
         assert_eq!(theme.normal.fg, Some(Color::Gray));
     }
 
@@ -429,9 +429,9 @@ preset = "nonexistent"
 "#;
         let cfg: ThemeConfig = toml::from_str(toml_str).unwrap();
         let theme = crate::tui::theme::Theme::from_config(&cfg);
-        // Should fall back to hardcoded defaults
-        assert_eq!(theme.title.fg, Some(Color::Cyan));
-        assert_eq!(theme.selected.bg, Some(Color::DarkGray));
+        // Should fall back to hardcoded Nord defaults
+        assert_eq!(theme.title.fg, Some(Color::Rgb(136, 192, 208)));
+        assert_eq!(theme.selected.bg, Some(Color::Rgb(59, 66, 82)));
     }
 
     #[test]
@@ -444,6 +444,6 @@ fg = "red"
         let theme = crate::tui::theme::Theme::from_config(&cfg);
         // No preset field → same as today
         assert_eq!(theme.title.fg, Some(Color::Red));
-        assert_eq!(theme.selected.bg, Some(Color::DarkGray));
+        assert_eq!(theme.selected.bg, Some(Color::Rgb(59, 66, 82)));
     }
 }

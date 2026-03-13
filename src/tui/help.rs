@@ -1,5 +1,5 @@
 use ratatui::{
-    layout::Rect,
+    layout::{Constraint, Direction, Layout, Rect},
     text::{Line, Span},
     widgets::Paragraph,
     Frame,
@@ -28,18 +28,21 @@ pub fn render(
 
     let mut spans = Vec::new();
 
+    // Mode badge
+    if passthrough_mode {
+        spans.push(Span::styled("▐ PASS ▌ ", theme.passthrough_indicator));
+    } else if confirm_mode {
+        spans.push(Span::styled("▐ CONFIRM ▌ ", theme.error));
+    } else if search_mode {
+        spans.push(Span::styled("▐ SEARCH ▌ ", theme.status_thinking));
+    } else {
+        spans.push(Span::styled("▐ NORMAL ▌ ", theme.label));
+    }
+
     if search_mode {
-        spans.push(Span::styled(" /", theme.title));
+        spans.push(Span::styled("/", theme.title));
         spans.push(Span::styled(search_query, theme.value));
         spans.push(Span::styled("  ", theme.key_hint));
-    }
-
-    if passthrough_mode {
-        spans.push(Span::styled(" PASSTHROUGH ", theme.passthrough_indicator));
-    }
-
-    if confirm_mode {
-        spans.push(Span::styled(" Kill session? ", theme.error));
     }
 
     for (i, (key, action)) in hints.iter().enumerate() {
@@ -50,7 +53,18 @@ pub fn render(
         spans.push(Span::styled(format!(":{}", action), theme.key_action));
     }
 
-    let line = Line::from(spans);
-    let help = Paragraph::new(line);
-    frame.render_widget(help, area);
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(20)])
+        .split(area);
+
+    frame.render_widget(Paragraph::new(Line::from(spans)), cols[0]);
+
+    let version = env!("CARGO_PKG_VERSION");
+    let ver_text = format!("v{} ", version);
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(ver_text, theme.label)))
+            .alignment(ratatui::layout::Alignment::Right),
+        cols[1],
+    );
 }

@@ -1,7 +1,7 @@
 use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Rect},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph},
+    widgets::{Block, BorderType, Borders, Clear, Paragraph},
     Frame,
 };
 
@@ -20,6 +20,7 @@ pub fn render(frame: &mut Frame, theme: &Theme) {
         .title(" Help ")
         .title_style(theme.title)
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(theme.border_focused);
 
     frame.render_widget(block, area);

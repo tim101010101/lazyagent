@@ -3,6 +3,7 @@ use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use crate::config::LayoutConfig;
 
 pub struct AppLayout {
+    pub header: Rect,
     pub sidebar: Rect,
     pub main: Rect,
     pub detail: Option<Rect>,
@@ -32,6 +33,7 @@ impl AppLayout {
                 .split(main_area);
 
             AppLayout {
+                header: Rect::default(),
                 sidebar: horizontal[0],
                 main: horizontal[1],
                 detail: Some(horizontal[2]),
@@ -48,6 +50,7 @@ impl AppLayout {
                 .split(main_area);
 
             AppLayout {
+                header: Rect::default(),
                 sidebar: horizontal[0],
                 main: horizontal[1],
                 detail: None,

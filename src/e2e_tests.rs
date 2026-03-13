@@ -371,7 +371,6 @@ fn test_status_icons_render() {
                 &app.sessions,
                 app.selected_index,
                 true,
-                &app.grouping_mode,
                 app.tick,
                 &app.theme,
                 &app.sidebar_config,
@@ -448,7 +447,6 @@ fn test_cjk_rendering_safety() {
                 &app.sessions,
                 app.selected_index,
                 true,
-                &app.grouping_mode,
                 app.tick,
                 &app.theme,
                 &app.sidebar_config,
@@ -530,7 +528,6 @@ fn test_render_narrow_terminal() {
                 &app.sessions,
                 app.selected_index,
                 true,
-                &app.grouping_mode,
                 app.tick,
                 &app.theme,
                 &app.sidebar_config,
@@ -794,7 +791,7 @@ fn test_render_custom_layout_percentages() {
         assert!(layout.detail.is_some());
         crate::tui::sidebar::render(
             frame, layout.sidebar, &app.sidebar_items, &app.sessions,
-            app.selected_index, true, &app.grouping_mode, app.tick,
+            app.selected_index, true, app.tick,
             &app.theme, &app.sidebar_config,
         );
     }).unwrap();
@@ -825,16 +822,19 @@ fn test_render_custom_sidebar_markers() {
         let layout = AppLayout::new(frame.area(), false, &app.layout_config);
         crate::tui::sidebar::render(
             frame, layout.sidebar, &app.sidebar_items, &app.sessions,
-            app.selected_index, true, &app.grouping_mode, app.tick,
+            app.selected_index, true, app.tick,
             &app.theme, &app.sidebar_config,
         );
     }).unwrap();
 
-    // Verify the "L" marker appears in the rendered buffer
+    // Verify the "L" marker appears somewhere in the rendered buffer
     let buf = terminal.backend().buffer().clone();
-    let content: String = (0..buf.area.width)
-        .map(|x| buf.cell((x, 1)).map(|c| c.symbol().to_string()).unwrap_or_default())
-        .collect();
+    let content: String = (0..buf.area.height).flat_map(|y| {
+        let row: String = (0..buf.area.width)
+            .map(|x| buf.cell((x, y)).map(|c| c.symbol().to_string()).unwrap_or_default())
+            .collect();
+        row.chars().collect::<Vec<_>>()
+    }).collect();
     assert!(content.contains("L"), "custom local marker 'L' should appear in sidebar, got: {content}");
 }
 
@@ -860,7 +860,7 @@ bold = false
         let layout = AppLayout::new(frame.area(), true, &app.layout_config);
         crate::tui::sidebar::render(
             frame, layout.sidebar, &app.sidebar_items, &app.sessions,
-            app.selected_index, true, &app.grouping_mode, app.tick,
+            app.selected_index, true, app.tick,
             &app.theme, &app.sidebar_config,
         );
         if let Some(detail_area) = layout.detail {

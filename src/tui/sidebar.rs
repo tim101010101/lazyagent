@@ -1,11 +1,12 @@
 use ratatui::{
+    style::Color,
     layout::Rect,
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState},
+    widgets::{Block, BorderType, Borders, List, ListItem, ListState},
     Frame,
 };
 
-use crate::app::{GroupingMode, SidebarItem};
+use crate::app::SidebarItem;
 use crate::config::SidebarConfig;
 use crate::protocol::{AgentSession, AgentStatus, SessionSource};
 use crate::tui::theme::Theme;
@@ -17,7 +18,6 @@ pub fn render(
     sessions: &[AgentSession],
     selected: usize,
     focused: bool,
-    grouping_mode: &GroupingMode,
     tick: u64,
     theme: &Theme,
     sidebar_config: &SidebarConfig,
@@ -28,17 +28,22 @@ pub fn render(
         theme.border_unfocused
     };
 
-    let title = format!(" Sessions [{}] ", grouping_mode.label());
+    let title = " Sessions ";
 
     let block = Block::default()
         .title(title)
         .title_style(theme.title)
         .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
         .border_style(border_style);
 
+    let inner = block.inner(area);
+
+    let mut session_row_idx: usize = 0;
     let list_items: Vec<ListItem> = items
         .iter()
-        .map(|item| match item {
+        .enumerate()
+        .map(|(item_idx, item)| match item {
             SidebarItem::SourceHeader(name) => {
                 let marker = if name == "local" {
                     &sidebar_config.local_marker
@@ -51,15 +56,23 @@ pub fn render(
                 )))
             }
             SidebarItem::GroupHeader(name) => {
+                let inner_w = area.width.saturating_sub(2) as usize;
                 let display = shorten_path(name);
-                ListItem::new(Line::from(Span::styled(
-                    format!("  {} ", display),
-                    theme.project_header,
-                )))
+                let fill_len = inner_w.saturating_sub(display.len() + 4);
+                let fill = "─".repeat(fill_len);
+                let text = format!(" ─ {} {}", display, fill);
+                ListItem::new(Line::from(Span::styled(text, theme.project_header)))
             }
             SidebarItem::Session(idx) => {
+                let is_selected = item_idx == selected;
+                let row_idx = session_row_idx;
+                session_row_idx += 1;
                 if let Some(session) = sessions.get(*idx) {
-                    render_session_item(session, area.width, tick, theme)
+                    let mut item = render_session_item(session, area.width, tick, theme, is_selected);
+                    if row_idx % 2 == 0 {
+                        item = item.style(ratatui::style::Style::default().bg(Color::Rgb(46, 52, 64)));
+                    }
+                    item
                 } else {
                     ListItem::new(Line::from(""))
                 }
@@ -70,11 +83,10 @@ pub fn render(
     let mut state = ListState::default();
     state.select(Some(selected));
 
-    let list = List::new(list_items)
-        .block(block)
-        .highlight_style(theme.selected);
+    let list = List::new(list_items).highlight_style(theme.selected);
 
-    frame.render_stateful_widget(list, area, &mut state);
+    frame.render_widget(block, area);
+    frame.render_stateful_widget(list, inner, &mut state);
 }
 
 fn render_session_item(
@@ -82,6 +94,7 @@ fn render_session_item(
     width: u16,
     tick: u64,
     theme: &Theme,
+    is_selected: bool,
 ) -> ListItem<'static> {
     let (icon, icon_style) = status_icon(&session.status, tick, theme);
 
@@ -97,14 +110,19 @@ fn render_session_item(
 
     let cwd_short = shorten_path(&session.cwd.to_string_lossy());
 
-    // Calculate available width for cwd
-    // Format: "  icon provider  cwd  time [R]"
-    let fixed_len = 5 + session.provider.len() + 2 + time_str.len() + source_marker.len() + 2;
+    // Format: "▌ icon provider  cwd  time [R]"
+    let fixed_len = 4 + session.provider.len() + 2 + time_str.len() + source_marker.len() + 2;
     let cwd_max = (width as usize).saturating_sub(fixed_len);
     let cwd_display = truncate_str(&cwd_short, cwd_max);
 
+    let bar = if is_selected {
+        Span::styled("▌ ", theme.selected_bar)
+    } else {
+        Span::styled("  ", theme.normal)
+    };
+
     ListItem::new(Line::from(vec![
-        Span::styled("   ", theme.normal),
+        bar,
         Span::styled(icon.to_string(), icon_style),
         Span::styled(format!(" {} ", session.provider), theme.normal),
         Span::styled(cwd_display, theme.label),

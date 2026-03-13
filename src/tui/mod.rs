@@ -1,4 +1,5 @@
 pub mod detail;
+pub mod header;
 pub mod help;
 pub mod help_overlay;
 pub mod layout;
